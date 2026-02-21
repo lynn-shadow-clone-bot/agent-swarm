@@ -8,7 +8,7 @@ import sqlite3
 import os
 from typing import Dict, List, Tuple
 
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'swarm.db')
+DB_PATH = os.environ.get('SWARM_DB_PATH', '/home/kai/.openclaw/workspace/skills/agent-swarm/swarm.db')
 
 class TaskRouter:
     """Routes tasks to appropriate agents based on decomposition."""
