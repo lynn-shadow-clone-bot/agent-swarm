@@ -200,14 +200,6 @@ def spawn_agents(task_id: str):
     print(f"\n🚀 Spawning {len(agents)} agents...")
     
     for agent_id, agent_type in agents:
-        template = load_agent_template(agent_type)
-        
-        # Create subtask description
-        subtask = f"You are part of an agent team working on: {task_id}\n"
-        subtask += f"Your role: {agent_type}\n"
-        subtask += f"Instructions: {template['system_prompt']}\n"
-        subtask += "Wait for task assignment from orchestrator."
-        
         print(f"  Spawning {agent_type}...")
         
         # Note: In real implementation, use OpenClaw API
