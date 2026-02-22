@@ -7,7 +7,6 @@ Coordinates multi-agent teams for complex tasks.
 import argparse
 import json
 import os
-import secrets
 import sqlite3
 import sys
 import uuid
@@ -15,7 +14,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 # Database setup
-DB_PATH = os.getenv('SWARM_DB', os.path.join(os.path.dirname(__file__), '..', 'swarm.db'))
+DB_PATH = os.environ.get('SWARM_DB', os.path.join(os.path.dirname(__file__), '..', 'swarm.db'))
 DB_TIMEOUT = 30.0
 
 def init_db():
@@ -213,7 +212,7 @@ def spawn_agents(task_id: str):
         
         # Note: In real implementation, use OpenClaw API
         # For now, create placeholder session key
-        session_key = secrets.token_urlsafe(32)
+        session_key = f"agent:swarm:{task_id}:{agent_id}"
         
         c.execute('''
             UPDATE agents 
