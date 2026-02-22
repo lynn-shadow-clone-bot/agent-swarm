@@ -189,7 +189,7 @@ while True:
     time.sleep(10)
 
 # 4. Get results
-conn = sqlite3.connect('swarm.db')
+conn = sqlite3.connect('swarm.db', timeout=30.0)
 c = conn.cursor()
 c.execute('SELECT result FROM tasks WHERE id = ?', (task_id,))
 final_result = c.fetchone()[0]
