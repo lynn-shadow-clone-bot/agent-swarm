@@ -7,6 +7,7 @@ Coordinates multi-agent teams for complex tasks.
 import argparse
 import json
 import os
+import secrets
 import sqlite3
 import sys
 import uuid
@@ -212,7 +213,7 @@ def spawn_agents(task_id: str):
         
         # Note: In real implementation, use OpenClaw API
         # For now, create placeholder session key
-        session_key = f"agent:swarm:{task_id}:{agent_id}"
+        session_key = secrets.token_urlsafe(32)
         
         c.execute('''
             UPDATE agents 
