@@ -14,8 +14,10 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 # Database setup
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'swarm.db')
-DB_TIMEOUT = 30.0
+try:
+    from db_config import DB_PATH, DB_TIMEOUT
+except ImportError:
+    from scripts.db_config import DB_PATH, DB_TIMEOUT
 
 def init_db():
     """Initialize database tables."""
