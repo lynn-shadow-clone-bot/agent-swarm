@@ -10,28 +10,16 @@ import os
 import sqlite3
 import sys
 import uuid
-import contextlib
 from datetime import datetime
 from typing import Dict, List, Optional
 
 # Database setup
 DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'swarm.db')
+DB_TIMEOUT = 30.0
 
-@contextlib.contextmanager
-def get_db_conn():
-    """Context manager for database connections."""
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-def init_db(conn: Optional[sqlite3.Connection] = None):
+def init_db():
     """Initialize database tables."""
-    if conn is None:
-        with get_db_conn() as conn:
-            return init_db(conn)
-
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     c = conn.cursor()
     
     c.execute('''
@@ -73,6 +61,7 @@ def init_db(conn: Optional[sqlite3.Connection] = None):
     ''')
     
     conn.commit()
+    conn.close()
 
 def load_agent_template(agent_type: str) -> Dict:
     """Load agent template from references."""
@@ -173,13 +162,11 @@ def ask_clarifying_questions(task: str) -> Dict:
         "tech_stack": answers.get("q4", "auto-detect")
     }
 
-def assemble_team(task: str, team_types: List[str], clarifications: Dict, conn: Optional[sqlite3.Connection] = None) -> str:
+def assemble_team(task: str, team_types: List[str], clarifications: Dict) -> str:
     """Assemble agent team and return task ID."""
-    if conn is None:
-        with get_db_conn() as conn:
-            return assemble_team(task, team_types, clarifications, conn)
-
     task_id = str(uuid.uuid4())
+    
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     c = conn.cursor()
     
     # Create task
@@ -197,15 +184,13 @@ def assemble_team(task: str, team_types: List[str], clarifications: Dict, conn: 
         ''', (agent_id, task_id, agent_type, 'pending'))
     
     conn.commit()
+    conn.close()
     
     return task_id
 
-def spawn_agents(task_id: str, conn: Optional[sqlite3.Connection] = None):
+def spawn_agents(task_id: str):
     """Spawn all agents for a task using OpenClaw sessions_spawn."""
-    if conn is None:
-        with get_db_conn() as conn:
-            return spawn_agents(task_id, conn)
-
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     c = conn.cursor()
     
     c.execute('SELECT id, agent_type FROM agents WHERE task_id = ? AND status = ?', 
@@ -245,15 +230,13 @@ def spawn_agents(task_id: str, conn: Optional[sqlite3.Connection] = None):
     c.execute('UPDATE tasks SET status = ? WHERE id = ?', ('executing', task_id))
     
     conn.commit()
+    conn.close()
     
     print(f"\n✅ All agents spawned for task {task_id[:8]}...")
 
-def execute_task(task_id: str, conn: Optional[sqlite3.Connection] = None):
+def execute_task(task_id: str):
     """Execute task with agent team."""
-    if conn is None:
-        with get_db_conn() as conn:
-            return execute_task(task_id, conn)
-
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     c = conn.cursor()
     
     c.execute('SELECT description FROM tasks WHERE id = ?', (task_id,))
@@ -301,6 +284,7 @@ def execute_task(task_id: str, conn: Optional[sqlite3.Connection] = None):
     ''', ('completed', final_result, datetime.now().isoformat(), task_id))
     
     conn.commit()
+    conn.close()
     
     print("\n" + "="*60)
     print("✅ TASK COMPLETED!")
@@ -310,12 +294,9 @@ def execute_task(task_id: str, conn: Optional[sqlite3.Connection] = None):
     print(f"Status: 100% COMPLETE")
     print(f"\n{final_result}")
 
-def get_status(task_id: str, conn: Optional[sqlite3.Connection] = None):
+def get_status(task_id: str):
     """Get status of a task."""
-    if conn is None:
-        with get_db_conn() as conn:
-            return get_status(task_id, conn)
-
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     c = conn.cursor()
     
     c.execute('SELECT * FROM tasks WHERE id = ?', (task_id,))
@@ -336,13 +317,12 @@ def get_status(task_id: str, conn: Optional[sqlite3.Connection] = None):
     print(f"\nAgents ({len(agents)}):")
     for agent_type, status in agents:
         print(f"  - {agent_type}: {status}")
+    
+    conn.close()
 
-def list_tasks(conn: Optional[sqlite3.Connection] = None):
+def list_tasks():
     """List all tasks."""
-    if conn is None:
-        with get_db_conn() as conn:
-            return list_tasks(conn)
-
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     c = conn.cursor()
     
     c.execute('SELECT id, description, status, created_at FROM tasks ORDER BY created_at DESC')
@@ -353,6 +333,8 @@ def list_tasks(conn: Optional[sqlite3.Connection] = None):
     
     for task_id, desc, status, created in tasks:
         print(f"{task_id[:8]}... | {status:12} | {desc[:40]}... | {created}")
+    
+    conn.close()
 
 def main():
     parser = argparse.ArgumentParser(description='Agent Swarm Orchestrator')
@@ -365,46 +347,45 @@ def main():
     
     args = parser.parse_args()
     
-    with get_db_conn() as conn:
-        # Initialize database
-        init_db(conn)
+    # Initialize database
+    init_db()
+    
+    if args.list:
+        list_tasks()
+        return
+    
+    if args.status and args.task_id:
+        get_status(args.task_id)
+        return
+    
+    if args.task and args.team:
+        # Parse team
+        team_types = [t.strip() for t in args.team.split(',')]
         
-        if args.list:
-            list_tasks(conn)
-            return
+        # Step 1: Clarify with orchestrator
+        clarifications = ask_clarifying_questions(args.task)
         
-        if args.status and args.task_id:
-            get_status(args.task_id, conn)
-            return
+        print("\n" + "="*60)
+        print("✅ Clarifications complete!")
+        print("="*60)
         
-        if args.task and args.team:
-            # Parse team
-            team_types = [t.strip() for t in args.team.split(',')]
-
-            # Step 1: Clarify with orchestrator
-            clarifications = ask_clarifying_questions(args.task)
-
-            print("\n" + "="*60)
-            print("✅ Clarifications complete!")
-            print("="*60)
-
-            # Step 2: Assemble team
-            task_id = assemble_team(args.task, team_types, clarifications, conn)
-
-            print(f"\n📝 Task ID: {task_id}")
-            print(f"👥 Team: {', '.join(team_types)}")
-
-            # Step 3: Spawn agents
-            spawn_agents(task_id, conn)
-
-            # Step 4: Execute
-            execute_task(task_id, conn)
-
-            print(f"\n💡 Check status anytime:")
-            print(f"   python3 scripts/orchestrator.py --status --task-id {task_id}")
-
-        else:
-            parser.print_help()
+        # Step 2: Assemble team
+        task_id = assemble_team(args.task, team_types, clarifications)
+        
+        print(f"\n📝 Task ID: {task_id}")
+        print(f"👥 Team: {', '.join(team_types)}")
+        
+        # Step 3: Spawn agents
+        spawn_agents(task_id)
+        
+        # Step 4: Execute
+        execute_task(task_id)
+        
+        print(f"\n💡 Check status anytime:")
+        print(f"   python3 scripts/orchestrator.py --status --task-id {task_id}")
+        
+    else:
+        parser.print_help()
 
 if __name__ == '__main__':
     main()

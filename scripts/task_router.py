@@ -8,13 +8,14 @@ import sqlite3
 import os
 from typing import Dict, List, Tuple
 
-DB_PATH = os.environ.get('SWARM_DB_PATH', '/home/kai/.openclaw/workspace/skills/agent-swarm/swarm.db')
+DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'swarm.db')
+DB_TIMEOUT = 30.0
 
 class TaskRouter:
     """Routes tasks to appropriate agents based on decomposition."""
     
     def __init__(self):
-        self.conn = sqlite3.connect(DB_PATH)
+        self.conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
         self.cursor = self.conn.cursor()
     
     def decompose_task(self, task_description: str, team_types: List[str]) -> List[Dict]:
@@ -178,14 +179,6 @@ class TaskRouter:
                     order.append((agent_type, subtask["task"]))
         
         return order
-
-    def get_task_info(self, task_id: str):
-        """Get task description and team configuration."""
-        self.cursor.execute(
-            'SELECT description, team_config FROM tasks WHERE id = ?',
-            (task_id,)
-        )
-        return self.cursor.fetchone()
     
     def close(self):
         self.conn.close()
@@ -203,8 +196,13 @@ def main():
     router = TaskRouter()
     
     if args.decompose:
-        # Get task info using existing router connection
-        task = router.get_task_info(args.task_id)
+        # Get task info
+        conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+        c = conn.cursor()
+        
+        c.execute('SELECT description, team_config FROM tasks WHERE id = ?', (args.task_id,))
+        task = c.fetchone()
+        conn.close()
         
         if task:
             description = task[0]
