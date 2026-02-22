@@ -7,69 +7,87 @@ Coordinates multi-agent teams for complex tasks.
 import argparse
 import json
 import os
-import sqlite3
 import sys
 import uuid
+import signal
+import logging
+import logging.handlers
 from datetime import datetime
 from typing import Dict, List, Optional
+import time
 
-# Database setup
-DB_PATH = os.environ.get('SWARM_DB', os.path.join(os.path.dirname(__file__), '..', 'swarm.db'))
-DB_TIMEOUT = 30.0
+# Add scripts dir to path if running directly
+if __name__ == '__main__':
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-def init_db():
-    """Initialize database tables."""
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
-    c = conn.cursor()
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS tasks (
-            id TEXT PRIMARY KEY,
-            description TEXT NOT NULL,
-            status TEXT DEFAULT 'pending',
-            team_config TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            completed_at TIMESTAMP,
-            result TEXT,
-            output_dir TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS agents (
-            id TEXT PRIMARY KEY,
-            task_id TEXT,
-            agent_type TEXT,
-            status TEXT DEFAULT 'pending',
-            session_key TEXT,
-            spawned_at TIMESTAMP,
-            completed_at TIMESTAMP,
-            result TEXT,
-            FOREIGN KEY (task_id) REFERENCES tasks(id)
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT,
-            agent_id TEXT,
-            message_type TEXT,
-            content TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
+try:
+    from scripts.config_loader import config
+    from scripts.db_config import get_connection
+    from scripts.db_migrations import apply_migrations
+    from scripts.openclaw_client import client as openclaw_client
+except ImportError:
+    from config_loader import config
+    from db_config import get_connection
+    from db_migrations import apply_migrations
+    from openclaw_client import client as openclaw_client
+
+# --- Logging Setup ---
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        log_record = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "name": record.name,
+            "message": record.getMessage()
+        }
+        if record.exc_info:
+            log_record["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_record)
+
+root_logger = logging.getLogger()
+root_logger.setLevel(getattr(logging, config.logging.level))
+root_logger.handlers = [] # Clear existing handlers
+
+# File Handler (JSON)
+if config.logging.file:
+    log_dir = os.path.dirname(config.logging.file)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    file_handler = logging.handlers.RotatingFileHandler(
+        config.logging.file,
+        maxBytes=config.logging.max_bytes,
+        backupCount=config.logging.backup_count
+    )
+    file_handler.setFormatter(JsonFormatter())
+    root_logger.addHandler(file_handler)
+
+# Console Handler (Text)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(message)s'))
+root_logger.addHandler(console_handler)
+
+logger = logging.getLogger('orchestrator')
+
+# --- Graceful Shutdown ---
+SHUTDOWN_REQUESTED = False
+
+def signal_handler(signum, frame):
+    global SHUTDOWN_REQUESTED
+    logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+    SHUTDOWN_REQUESTED = True
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+# --- Logic ---
 
 def load_agent_template(agent_type: str) -> Dict:
     """Load agent template from references."""
-    template_path = os.path.join(
-        os.path.dirname(__file__), '..', 'references', 'AGENT_TEMPLATES.md'
-    )
+    # We maintain this dictionary as a fallback/reference,
+    # but ideally should sync with agent_pool or agent_templates dir.
+    # For this phase, we keep the existing logic structure.
     
-    # Default templates (fallback)
     templates = {
         "code-writer": {
             "agent_id": "code-writer",
@@ -125,11 +143,11 @@ def load_agent_template(agent_type: str) -> Dict:
 
 def ask_clarifying_questions(task: str) -> Dict:
     """Ask user clarifying questions before starting."""
-    print("\n" + "="*60)
-    print("🤖 AGENT SWARM ORCHESTRATOR")
-    print("="*60)
-    print(f"\nTask: {task}")
-    print("\nBefore assembling the team, I need to clarify a few things:")
+    logger.info("="*60)
+    logger.info("🤖 AGENT SWARM ORCHESTRATOR")
+    logger.info("="*60)
+    logger.info(f"\nTask: {task}")
+    logger.info("\nBefore assembling the team, I need to clarify a few things:")
     
     questions = [
         "What is the expected output format? (e.g., code files, documentation, analysis)",
@@ -142,7 +160,7 @@ def ask_clarifying_questions(task: str) -> Dict:
     
     # For non-interactive mode, use defaults
     if not sys.stdin.isatty():
-        print("\n(Running in non-interactive mode, using defaults)")
+        logger.info("\n(Running in non-interactive mode, using defaults)")
         return {
             "output_format": "code files",
             "constraints": "none",
@@ -151,8 +169,11 @@ def ask_clarifying_questions(task: str) -> Dict:
         }
     
     for i, question in enumerate(questions, 1):
-        print(f"\n{i}. {question}")
-        answer = input("   > ").strip()
+        print(f"\n{i}. {question}") # Print is fine for prompt
+        try:
+            answer = input("   > ").strip()
+        except EOFError:
+            answer = ""
         answers[f"q{i}"] = answer if answer else "none"
     
     return {
@@ -165,8 +186,7 @@ def ask_clarifying_questions(task: str) -> Dict:
 def assemble_team(task: str, team_types: List[str], clarifications: Dict) -> str:
     """Assemble agent team and return task ID."""
     task_id = str(uuid.uuid4())
-    
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = get_connection()
     c = conn.cursor()
     
     # Create task
@@ -189,73 +209,94 @@ def assemble_team(task: str, team_types: List[str], clarifications: Dict) -> str
     return task_id
 
 def spawn_agents(task_id: str):
-    """Spawn all agents for a task using OpenClaw sessions_spawn."""
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    """Spawn all agents for a task using OpenClaw."""
+    if SHUTDOWN_REQUESTED:
+        return
+
+    conn = get_connection()
     c = conn.cursor()
     
     c.execute('SELECT id, agent_type FROM agents WHERE task_id = ? AND status = ?', 
               (task_id, 'pending'))
     agents = c.fetchall()
     
-    print(f"\n🚀 Spawning {len(agents)} agents...")
+    logger.info(f"\n🚀 Spawning {len(agents)} agents...")
     
     for agent_id, agent_type in agents:
+        if SHUTDOWN_REQUESTED:
+            logger.info("Shutdown requested, stopping spawn...")
+            break
+
         template = load_agent_template(agent_type)
         
-        # Create subtask description
-        subtask = f"You are part of an agent team working on: {task_id}\n"
-        subtask += f"Your role: {agent_type}\n"
-        subtask += f"Instructions: {template['system_prompt']}\n"
-        subtask += "Wait for task assignment from orchestrator."
+        logger.info(f"  Spawning {agent_type}...")
         
-        print(f"  Spawning {agent_type}...")
-        
-        # Note: In real implementation, use OpenClaw API
-        # For now, create placeholder session key
-        session_key = f"agent:swarm:{task_id}:{agent_id}"
-        
-        c.execute('''
-            UPDATE agents 
-            SET status = ?, session_key = ?, spawned_at = ?
-            WHERE id = ?
-        ''', ('active', session_key, datetime.now().isoformat(), agent_id))
-        
-        # Simulate spawn message
-        c.execute('''
-            INSERT INTO messages (task_id, agent_id, message_type, content)
-            VALUES (?, ?, ?, ?)
-        ''', (task_id, agent_id, 'SPAWNED', f'Agent {agent_type} ready'))
+        try:
+            session_key = openclaw_client.spawn_agent(
+                task=f"Task: {task_id}. Role: {agent_type}. {template.get('system_prompt', '')}",
+                label=f"{agent_type}-{task_id[:8]}",
+                model=template.get("model", "kimi-coding/k2p5"),
+                thinking=template.get("thinking", "high")
+            )
+
+            c.execute('''
+                UPDATE agents
+                SET status = ?, session_key = ?, spawned_at = ?
+                WHERE id = ?
+            ''', ('active', session_key, datetime.now().isoformat(), agent_id))
+
+            # Log spawn message
+            c.execute('''
+                INSERT INTO messages (task_id, agent_id, message_type, content)
+                VALUES (?, ?, ?, ?)
+            ''', (task_id, agent_id, 'SPAWNED', f'Agent {agent_type} ready: {session_key}'))
+
+        except Exception as e:
+            logger.error(f"Failed to spawn agent {agent_type}: {e}")
     
     # Update task status
-    c.execute('UPDATE tasks SET status = ? WHERE id = ?', ('executing', task_id))
+    if not SHUTDOWN_REQUESTED:
+        c.execute('UPDATE tasks SET status = ? WHERE id = ?', ('executing', task_id))
     
     conn.commit()
     conn.close()
     
-    print(f"\n✅ All agents spawned for task {task_id[:8]}...")
+    logger.info(f"\n✅ All agents spawned for task {task_id[:8]}...")
 
 def execute_task(task_id: str):
     """Execute task with agent team."""
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = get_connection()
     c = conn.cursor()
     
     c.execute('SELECT description FROM tasks WHERE id = ?', (task_id,))
-    task = c.fetchone()[0]
+    task_row = c.fetchone()
+    if not task_row:
+        logger.error(f"Task {task_id} not found")
+        return
+    task = task_row[0]
     
-    print(f"\n📋 Executing: {task}")
-    print("="*60)
+    logger.info(f"\n📋 Executing: {task}")
+    logger.info("="*60)
     
     # Get all agents
     c.execute('SELECT id, agent_type, session_key FROM agents WHERE task_id = ?', (task_id,))
     agents = c.fetchall()
     
-    # Simulate execution (in real implementation, use OpenClaw sessions_send)
-    print(f"\n🔄 Coordinating {len(agents)} agents...")
+    logger.info(f"\n🔄 Coordinating {len(agents)} agents...")
     
     for i, (agent_id, agent_type, session_key) in enumerate(agents, 1):
-        print(f"  [{i}/{len(agents)}] {agent_type} working...")
+        if SHUTDOWN_REQUESTED:
+            break
+
+        logger.info(f"  [{i}/{len(agents)}] {agent_type} working...")
+
+        # Notify agent
+        try:
+            if session_key and session_key != "unknown_session":
+                openclaw_client.send_message(session_key, "Start working on your task.")
+        except Exception as e:
+            logger.error(f"Failed to communicate with {agent_type}: {e}")
         
-        # Simulate work
         c.execute('''
             UPDATE agents SET status = ? WHERE id = ?
         ''', ('working', agent_id))
@@ -274,65 +315,67 @@ def execute_task(task_id: str):
             VALUES (?, ?, ?, ?)
         ''', (task_id, agent_id, 'COMPLETED', result))
     
-    # Mark task complete
-    final_result = f"Task completed by {len(agents)} agents. All subtasks finished."
+    if not SHUTDOWN_REQUESTED:
+        # Mark task complete
+        final_result = f"Task completed by {len(agents)} agents. All subtasks finished."
+
+        c.execute('''
+            UPDATE tasks
+            SET status = ?, result = ?, completed_at = ?
+            WHERE id = ?
+        ''', ('completed', final_result, datetime.now().isoformat(), task_id))
+
+        conn.commit()
     
-    c.execute('''
-        UPDATE tasks 
-        SET status = ?, result = ?, completed_at = ?
-        WHERE id = ?
-    ''', ('completed', final_result, datetime.now().isoformat(), task_id))
-    
-    conn.commit()
     conn.close()
     
-    print("\n" + "="*60)
-    print("✅ TASK COMPLETED!")
-    print("="*60)
-    print(f"\nTask ID: {task_id}")
-    print(f"Agents: {len(agents)}")
-    print(f"Status: 100% COMPLETE")
-    print(f"\n{final_result}")
+    logger.info("\n" + "="*60)
+    logger.info("✅ TASK COMPLETED!")
+    logger.info("="*60)
+    logger.info(f"\nTask ID: {task_id}")
+    logger.info(f"Agents: {len(agents)}")
+    logger.info(f"Status: 100% COMPLETE")
+    logger.info(f"\n{final_result}")
 
 def get_status(task_id: str):
     """Get status of a task."""
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = get_connection()
     c = conn.cursor()
     
     c.execute('SELECT * FROM tasks WHERE id = ?', (task_id,))
     task = c.fetchone()
     
     if not task:
-        print(f"Task {task_id} not found")
+        logger.error(f"Task {task_id} not found")
         return
     
-    print(f"\n📊 Task Status: {task_id[:8]}...")
-    print(f"Description: {task[1]}")
-    print(f"Status: {task[2]}")
-    print(f"Created: {task[4]}")
+    logger.info(f"\n📊 Task Status: {task_id[:8]}...")
+    logger.info(f"Description: {task[1]}")
+    logger.info(f"Status: {task[2]}")
+    logger.info(f"Created: {task[4]}")
     
     c.execute('SELECT agent_type, status FROM agents WHERE task_id = ?', (task_id,))
     agents = c.fetchall()
     
-    print(f"\nAgents ({len(agents)}):")
+    logger.info(f"\nAgents ({len(agents)}):")
     for agent_type, status in agents:
-        print(f"  - {agent_type}: {status}")
+        logger.info(f"  - {agent_type}: {status}")
     
     conn.close()
 
 def list_tasks():
     """List all tasks."""
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = get_connection()
     c = conn.cursor()
     
     c.execute('SELECT id, description, status, created_at FROM tasks ORDER BY created_at DESC')
     tasks = c.fetchall()
     
-    print(f"\n📋 All Tasks ({len(tasks)} total):")
-    print("-" * 80)
+    logger.info(f"\n📋 All Tasks ({len(tasks)} total):")
+    logger.info("-" * 80)
     
     for task_id, desc, status, created in tasks:
-        print(f"{task_id[:8]}... | {status:12} | {desc[:40]}... | {created}")
+        logger.info(f"{task_id[:8]}... | {status:12} | {desc[:40]}... | {created}")
     
     conn.close()
 
@@ -348,7 +391,7 @@ def main():
     args = parser.parse_args()
     
     # Initialize database
-    init_db()
+    apply_migrations()
     
     if args.list:
         list_tasks()
@@ -365,24 +408,36 @@ def main():
         # Step 1: Clarify with orchestrator
         clarifications = ask_clarifying_questions(args.task)
         
-        print("\n" + "="*60)
-        print("✅ Clarifications complete!")
-        print("="*60)
+        logger.info("\n" + "="*60)
+        logger.info("✅ Clarifications complete!")
+        logger.info("="*60)
         
+        if SHUTDOWN_REQUESTED:
+             logger.info("Shutdown requested.")
+             return
+
         # Step 2: Assemble team
         task_id = assemble_team(args.task, team_types, clarifications)
         
-        print(f"\n📝 Task ID: {task_id}")
-        print(f"👥 Team: {', '.join(team_types)}")
+        logger.info(f"\n📝 Task ID: {task_id}")
+        logger.info(f"👥 Team: {', '.join(team_types)}")
         
+        if SHUTDOWN_REQUESTED:
+             logger.info("Shutdown requested.")
+             return
+
         # Step 3: Spawn agents
         spawn_agents(task_id)
         
+        if SHUTDOWN_REQUESTED:
+             logger.info("Shutdown requested.")
+             return
+
         # Step 4: Execute
         execute_task(task_id)
         
-        print(f"\n💡 Check status anytime:")
-        print(f"   python3 scripts/orchestrator.py --status --task-id {task_id}")
+        logger.info(f"\n💡 Check status anytime:")
+        logger.info(f"   python3 scripts/orchestrator.py --status --task-id {task_id}")
         
     else:
         parser.print_help()

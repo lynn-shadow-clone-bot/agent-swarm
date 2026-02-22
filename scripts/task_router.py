@@ -6,19 +6,26 @@ Task Router - Decomposes tasks and assigns to agents.
 import json
 import sqlite3
 import os
-from typing import Dict, List, Tuple
+import sys
+from typing import Dict, List, Tuple, Any
 
-DB_PATH = os.environ.get('SWARM_DB', os.path.join(os.path.dirname(__file__), '..', 'swarm.db'))
-DB_TIMEOUT = 30.0
+# Add scripts dir to path if running directly
+if __name__ == '__main__':
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+try:
+    from scripts.db_config import get_connection
+except ImportError:
+    from db_config import get_connection
 
 class TaskRouter:
     """Routes tasks to appropriate agents based on decomposition."""
     
     def __init__(self):
-        self.conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+        self.conn = get_connection()
         self.cursor = self.conn.cursor()
     
-    def decompose_task(self, task_description: str, team_types: List[str]) -> List[Dict]:
+    def decompose_task(self, task_description: str, team_types: List[str]) -> List[Dict[str, Any]]:
         """
         Decompose task into sub-tasks for each agent type.
         
@@ -35,7 +42,7 @@ class TaskRouter:
         subtasks = []
         
         # Task analysis keywords
-        task_lower = task_description.lower()
+        # task_lower = task_description.lower() # Unused
         
         for agent_type in team_types:
             if agent_type == "architect":
@@ -130,33 +137,40 @@ class TaskRouter:
     
     def assign_tasks(self, task_id: str, subtasks: List[Dict]):
         """Assign subtasks to agents in database."""
+        # Note: We should use executemany for batch updates if possible,
+        # but here we need to match agent_type to id.
+
+        # Pre-fetch active agents for this task
+        self.cursor.execute('''
+            SELECT agent_type, id FROM agents
+            WHERE task_id = ? AND status = 'active'
+        ''', (task_id,))
+        agents_map = {row[0]: row[1] for row in self.cursor.fetchall()}
+
+        updates = []
         for subtask in subtasks:
-            # Find agent of this type for this task
-            self.cursor.execute('''
-                SELECT id FROM agents 
-                WHERE task_id = ? AND agent_type = ? AND status = 'active'
-            ''', (task_id, subtask["agent_type"]))
-            
-            agent = self.cursor.fetchone()
-            if agent:
-                # Store subtask assignment
-                self.cursor.execute('''
-                    UPDATE agents 
-                    SET result = ?
-                    WHERE id = ?
-                ''', (json.dumps(subtask), agent[0]))
-                
+            agent_id = agents_map.get(subtask["agent_type"])
+            if agent_id:
+                updates.append((json.dumps(subtask), agent_id))
                 print(f"  Assigned to {subtask['agent_type']}: {subtask['task'][:50]}...")
-        
-        self.conn.commit()
+            else:
+                print(f"  Warning: No active agent found for {subtask['agent_type']}")
+
+        if updates:
+            self.cursor.executemany('''
+                UPDATE agents
+                SET result = ?
+                WHERE id = ?
+            ''', updates)
+            self.conn.commit()
     
     def get_execution_order(self, task_id: str) -> List[Tuple[str, str]]:
         """Get execution order based on dependencies."""
         self.cursor.execute('''
-            SELECT a.agent_type, a.result 
-            FROM agents a
-            WHERE a.task_id = ?
-            ORDER BY a.spawned_at
+            SELECT agent_type, result
+            FROM agents
+            WHERE task_id = ?
+            ORDER BY spawned_at
         ''', (task_id,))
         
         agents = self.cursor.fetchall()
@@ -171,11 +185,13 @@ class TaskRouter:
                 deps = subtask.get("dependencies", [])
                 
                 # Check if dependencies are satisfied
+                # This logic is a bit simple, assumes sequential processing or that we know what is completed.
+                # Just listing them for now.
                 if all(dep in completed for dep in deps):
                     order.append((agent_type, subtask["task"]))
                     completed.add(agent_type)
                 else:
-                    # Add to end of queue
+                    # Add to end of queue or handle later
                     order.append((agent_type, subtask["task"]))
         
         return order
@@ -197,12 +213,11 @@ def main():
     
     if args.decompose:
         # Get task info
-        conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
-        c = conn.cursor()
+        # Use router's connection
+        c = router.cursor
         
         c.execute('SELECT description, team_config FROM tasks WHERE id = ?', (args.task_id,))
         task = c.fetchone()
-        conn.close()
         
         if task:
             description = task[0]
