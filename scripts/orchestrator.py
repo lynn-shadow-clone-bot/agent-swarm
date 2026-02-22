@@ -255,7 +255,7 @@ async def assemble_team(task: str, team_types: List[str], clarifications: Dict) 
 
         try:
             audit_logger.log_event("TEAM_ASSEMBLY_STARTED", "orchestrator", {"task_id": task_id, "team": team_types})
-            
+
             def _assemble_transaction():
                 pool = get_pool()
                 conn = pool.get_connection()

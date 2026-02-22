@@ -20,7 +20,7 @@ class TestOrchestratorFailure(unittest.TestCase):
         if scripts.db_config._pool:
             scripts.db_config._pool.close_all()
         scripts.db_config._pool = None
-        
+
         # Create a temporary directory for the database
         self.test_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.test_dir, 'test_swarm.db')
