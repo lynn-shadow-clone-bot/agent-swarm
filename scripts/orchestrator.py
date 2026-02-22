@@ -63,65 +63,61 @@ def init_db():
     conn.commit()
     conn.close()
 
+# Default templates (fallback)
+DEFAULT_AGENT_TEMPLATES = {
+    "code-writer": {
+        "agent_id": "code-writer",
+        "model": "kimi-coding/k2p5",
+        "thinking": "high",
+        "system_prompt": "You are a senior software engineer. Write clean, efficient, well-documented code."
+    },
+    "code-reviewer": {
+        "agent_id": "code-reviewer",
+        "model": "kimi-coding/k2p5",
+        "thinking": "high",
+        "system_prompt": "You are a code reviewer. Analyze code for bugs, security issues, and best practices."
+    },
+    "tester": {
+        "agent_id": "tester",
+        "model": "kimi-coding/k2p5",
+        "thinking": "high",
+        "system_prompt": "You are a QA engineer. Write comprehensive tests and validate implementations."
+    },
+    "researcher": {
+        "agent_id": "researcher",
+        "model": "kimi-coding/k2p5",
+        "thinking": "high",
+        "system_prompt": "You are a technical researcher. Search for information and summarize findings."
+    },
+    "debugger": {
+        "agent_id": "debugger",
+        "model": "kimi-coding/k2p5",
+        "thinking": "high",
+        "system_prompt": "You are a debugging expert. Analyze errors and find root causes."
+    },
+    "architect": {
+        "agent_id": "architect",
+        "model": "kimi-coding/k2p5",
+        "thinking": "high",
+        "system_prompt": "You are a software architect. Design scalable, maintainable systems."
+    },
+    "documenter": {
+        "agent_id": "documenter",
+        "model": "kimi-coding/k2p5",
+        "thinking": "medium",
+        "system_prompt": "You are a technical writer. Write clear, concise documentation."
+    },
+    "optimizer": {
+        "agent_id": "optimizer",
+        "model": "kimi-coding/k2p5",
+        "thinking": "high",
+        "system_prompt": "You are a performance engineer. Optimize code for efficiency."
+    }
+}
+
 def load_agent_template(agent_type: str) -> Dict:
     """Load agent template from references."""
-    template_path = os.path.join(
-        os.path.dirname(__file__), '..', 'references', 'AGENT_TEMPLATES.md'
-    )
-    
-    # Default templates (fallback)
-    templates = {
-        "code-writer": {
-            "agent_id": "code-writer",
-            "model": "kimi-coding/k2p5",
-            "thinking": "high",
-            "system_prompt": "You are a senior software engineer. Write clean, efficient, well-documented code."
-        },
-        "code-reviewer": {
-            "agent_id": "code-reviewer",
-            "model": "kimi-coding/k2p5",
-            "thinking": "high",
-            "system_prompt": "You are a code reviewer. Analyze code for bugs, security issues, and best practices."
-        },
-        "tester": {
-            "agent_id": "tester",
-            "model": "kimi-coding/k2p5",
-            "thinking": "high",
-            "system_prompt": "You are a QA engineer. Write comprehensive tests and validate implementations."
-        },
-        "researcher": {
-            "agent_id": "researcher",
-            "model": "kimi-coding/k2p5",
-            "thinking": "high",
-            "system_prompt": "You are a technical researcher. Search for information and summarize findings."
-        },
-        "debugger": {
-            "agent_id": "debugger",
-            "model": "kimi-coding/k2p5",
-            "thinking": "high",
-            "system_prompt": "You are a debugging expert. Analyze errors and find root causes."
-        },
-        "architect": {
-            "agent_id": "architect",
-            "model": "kimi-coding/k2p5",
-            "thinking": "high",
-            "system_prompt": "You are a software architect. Design scalable, maintainable systems."
-        },
-        "documenter": {
-            "agent_id": "documenter",
-            "model": "kimi-coding/k2p5",
-            "thinking": "medium",
-            "system_prompt": "You are a technical writer. Write clear, concise documentation."
-        },
-        "optimizer": {
-            "agent_id": "optimizer",
-            "model": "kimi-coding/k2p5",
-            "thinking": "high",
-            "system_prompt": "You are a performance engineer. Optimize code for efficiency."
-        }
-    }
-    
-    return templates.get(agent_type, templates["code-writer"])
+    return DEFAULT_AGENT_TEMPLATES.get(agent_type, DEFAULT_AGENT_TEMPLATES["code-writer"])
 
 def ask_clarifying_questions(task: str) -> Dict:
     """Ask user clarifying questions before starting."""
