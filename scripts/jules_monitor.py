@@ -7,11 +7,14 @@ import json
 import os
 import subprocess
 import sys
+import urllib.request
+import urllib.parse
 from datetime import datetime
 
 # Config
 SESSIONS_FILE = os.path.expanduser("~/.openclaw/workspace/skills/agent-swarm/.jules_sessions")
 NOTIFICATION_LOG = os.path.expanduser("~/.openclaw/workspace/skills/agent-swarm/logs/jules_monitor.log")
+TELEGRAM_BOT_TOKEN = "8539437601:AAEgGVkcNTyNNse6hpa251sPUDyxaq53Xu8"
 TELEGRAM_CHAT_ID = "8449755183"  # Kai's Telegram ID
 
 def log(message):
@@ -27,6 +30,30 @@ def log(message):
     
     with open(NOTIFICATION_LOG, "a") as f:
         f.write(log_line + "\n")
+
+def send_telegram_message(message):
+    """Send message via Telegram Bot API."""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = urllib.parse.urlencode({
+            'chat_id': TELEGRAM_CHAT_ID,
+            'text': message,
+            'parse_mode': 'HTML'
+        }).encode()
+        
+        req = urllib.request.Request(url, data=data, method='POST')
+        req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            result = json.loads(response.read().decode())
+            if result.get('ok'):
+                return True
+            else:
+                log(f"Telegram API error: {result}")
+                return False
+    except Exception as e:
+        log(f"Failed to send Telegram message: {e}")
+        return False
 
 def load_sessions():
     """Load tracked sessions from file."""
@@ -83,47 +110,37 @@ def get_jules_status(session_id):
         return None
 
 def send_telegram_notification(session_id, session_info):
-    """Send notification via Telegram (via OpenClaw message tool)."""
+    """Send notification via Telegram Bot API."""
     repo = session_info.get("repo", "unknown")
     description = session_info.get("description", "No description")
     status = session_info.get("status", "Completed")
     
-    message = f"""🎯 Jules Session FERTIG!
+    message = f"""🎯 <b>Jules Session FERTIG!</b>
 
-Session ID: {session_id}
-Status: {status}
-Repo: {repo}
-Description: {description}
+<b>Session ID:</b> {session_id}
+<b>Status:</b> {status}
+<b>Repo:</b> {repo}
+<b>Description:</b> {description}
 
-🔗 Review: https://jules.google.com/session/{session_id}
+🔗 <a href="https://jules.google.com/session/{session_id}">Review auf Jules</a>
 
-💻 PR erstellen:
-```
+💻 <b>PR erstellen:</b>
 cd ~/.openclaw/workspace/skills/agent-swarm
 jules remote pull --session {session_id} --apply
-```
 """
     
-    # Write to notification directory for main agent to pick up
-    notification_dir = "/tmp/jules_notifications"
-    os.makedirs(notification_dir, exist_ok=True)
-    
-    notification_file = f"{notification_dir}/jules_notification_{session_id}.txt"
-    with open(notification_file, "w") as f:
-        f.write(message)
-    
-    log(f"Notification queued for session {session_id}: {notification_file}")
-    
-    # Also try to use openclaw notify if available
-    try:
-        subprocess.run(
-            ["openclaw", "notify", "--channel", "telegram", "--user", TELEGRAM_CHAT_ID, "--message", message],
-            capture_output=True,
-            timeout=10
-        )
-        log(f"Direct notification sent for session {session_id}")
-    except Exception as e:
-        log(f"Direct notification not available (expected in cron): {e}")
+    # Send directly via Telegram API
+    if send_telegram_message(message):
+        log(f"✅ Telegram notification sent for session {session_id}")
+    else:
+        log(f"❌ Failed to send Telegram notification for session {session_id}")
+        # Fallback: write to file
+        notification_dir = "/tmp/jules_notifications"
+        os.makedirs(notification_dir, exist_ok=True)
+        notification_file = f"{notification_dir}/jules_notification_{session_id}.txt"
+        with open(notification_file, "w") as f:
+            f.write(message)
+        log(f"Notification saved to file: {notification_file}")
 
 def main():
     """Main monitoring loop."""
@@ -156,7 +173,7 @@ def main():
             # Update session info with status
             session_info["status"] = status
             
-            # Send notification
+            # Send notification via Telegram
             send_telegram_notification(session_id, session_info)
             
             # Mark for removal
