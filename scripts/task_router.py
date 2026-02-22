@@ -8,8 +8,10 @@ import sqlite3
 import os
 from typing import Dict, List, Tuple
 
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'swarm.db')
-DB_TIMEOUT = 30.0
+try:
+    from db import DB_PATH, DB_TIMEOUT
+except ImportError:
+    from scripts.db import DB_PATH, DB_TIMEOUT
 
 class TaskRouter:
     """Routes tasks to appropriate agents based on decomposition."""
