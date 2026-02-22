@@ -178,6 +178,14 @@ class TaskRouter:
                     order.append((agent_type, subtask["task"]))
         
         return order
+
+    def get_task_info(self, task_id: str):
+        """Get task description and team configuration."""
+        self.cursor.execute(
+            'SELECT description, team_config FROM tasks WHERE id = ?',
+            (task_id,)
+        )
+        return self.cursor.fetchone()
     
     def close(self):
         self.conn.close()
@@ -195,13 +203,8 @@ def main():
     router = TaskRouter()
     
     if args.decompose:
-        # Get task info
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        
-        c.execute('SELECT description, team_config FROM tasks WHERE id = ?', (args.task_id,))
-        task = c.fetchone()
-        conn.close()
+        # Get task info using existing router connection
+        task = router.get_task_info(args.task_id)
         
         if task:
             description = task[0]
