@@ -1,5 +1,10 @@
 prometheus_client==0.20.0
 opentelemetry-api==1.25.0
 opentelemetry-sdk==1.25.0
-pydantic==2.6.4
+pydantic>=2.7.0
 PyYAML==6.0.1
+fastapi
+uvicorn
+rich
+websockets
+python-multipart

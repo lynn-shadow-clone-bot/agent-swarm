@@ -24,6 +24,17 @@ if __name__ == '__main__':
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.logging import RichHandler
+    from rich import print as rprint
+    RICH_AVAILABLE = True
+    console = Console()
+except ImportError:
+    RICH_AVAILABLE = False
+    console = None
+
+try:
     from scripts.config_loader import config
     from scripts.db_config import get_pool
     from scripts.db_migrations import apply_migrations
@@ -53,30 +64,36 @@ class JsonFormatter(logging.Formatter):
             log_record["exception"] = self.formatException(record.exc_info)
         return json.dumps(log_record)
 
-root_logger = logging.getLogger()
-root_logger.setLevel(getattr(logging, config.logging.level))
-root_logger.handlers = [] # Clear existing handlers
-
-# File Handler (JSON)
-if config.logging.file:
-    log_dir = os.path.dirname(config.logging.file)
-    if log_dir and not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-
-    file_handler = logging.handlers.RotatingFileHandler(
-        config.logging.file,
-        maxBytes=config.logging.max_bytes,
-        backupCount=config.logging.backup_count
-    )
-    file_handler.setFormatter(JsonFormatter())
-    root_logger.addHandler(file_handler)
-
-# Console Handler (Text)
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(logging.Formatter('%(message)s'))
-root_logger.addHandler(console_handler)
-
 logger = logging.getLogger('orchestrator')
+
+def setup_logging():
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, config.logging.level))
+    root_logger.handlers = [] # Clear existing handlers
+
+    # File Handler (JSON)
+    if config.logging.file:
+        log_dir = os.path.dirname(config.logging.file)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+
+        file_handler = logging.handlers.RotatingFileHandler(
+            config.logging.file,
+            maxBytes=config.logging.max_bytes,
+            backupCount=config.logging.backup_count
+        )
+        file_handler.setFormatter(JsonFormatter())
+        root_logger.addHandler(file_handler)
+
+    # Console Handler (Text or Rich)
+    if RICH_AVAILABLE:
+        console_handler = RichHandler(rich_tracebacks=True, show_time=False, show_level=True, show_path=False)
+        # RichHandler sets its own formatter
+    else:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter('%(message)s'))
+
+    root_logger.addHandler(console_handler)
 
 # --- Graceful Shutdown ---
 SHUTDOWN_REQUESTED = False
@@ -86,8 +103,9 @@ def signal_handler(signum, frame):
     logger.info(f"Received signal {signum}, initiating graceful shutdown...")
     SHUTDOWN_REQUESTED = True
 
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
+def register_signal_handlers():
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
 
 # --- DB Helpers ---
 
@@ -203,7 +221,7 @@ def load_agent_template(agent_type: str) -> Dict:
     
     return templates.get(agent_type, templates["code-writer"])
 
-def ask_clarifying_questions(task: str) -> Dict:
+def ask_clarifying_questions(task: str, interactive: bool = True) -> Dict:
     """Ask user clarifying questions before starting."""
     logger.info("="*60)
     logger.info("🤖 AGENT SWARM ORCHESTRATOR")
@@ -218,10 +236,8 @@ def ask_clarifying_questions(task: str) -> Dict:
         "Is there a preferred technology stack or approach?"
     ]
     
-    answers = {}
-    
     # For non-interactive mode, use defaults
-    if not sys.stdin.isatty():
+    if not interactive or not sys.stdin.isatty():
         logger.info("\n(Running in non-interactive mode, using defaults)")
         return {
             "output_format": "code files",
@@ -230,6 +246,7 @@ def ask_clarifying_questions(task: str) -> Dict:
             "tech_stack": "auto-detect"
         }
     
+    answers = {}
     for i, question in enumerate(questions, 1):
         print(f"\n{i}. {question}") # Print is fine for prompt
         try:
@@ -518,48 +535,116 @@ async def execute_task(task_id: str):
                 metrics.task_duration.observe(time.time() - start_time)
                 audit_logger.log_event("TASK_COMPLETED", "orchestrator", {"task_id": task_id, "duration": time.time() - start_time})
 
-async def get_status(task_id: str):
-    """Get status of a task."""
-    try:
-        task = await db_query_one('SELECT * FROM tasks WHERE id = ?', (task_id,))
+async def get_task_status_data(task_id: str) -> Optional[Dict]:
+    """Get detailed status data for a task."""
+    task = await db_query_one('SELECT * FROM tasks WHERE id = ?', (task_id,))
+    if not task:
+        return None
 
-        if not task:
+    agents = await db_query_all('SELECT id, agent_type, status, result, spawned_at, completed_at FROM agents WHERE task_id = ?', (task_id,))
+
+    agents_data = []
+    for a in agents:
+        agents_data.append({
+            "id": a[0],
+            "type": a[1],
+            "status": a[2],
+            "result": a[3],
+            "spawned_at": a[4],
+            "completed_at": a[5]
+        })
+
+    return {
+        "id": task[0],
+        "description": task[1],
+        "status": task[2],
+        "result": task[3],
+        "created_at": task[4],
+        "completed_at": task[5] if len(task) > 5 else None,
+        "team_config": json.loads(task[6]) if len(task) > 6 and task[6] else [],
+        "agents": agents_data
+    }
+
+async def get_status(task_id: str):
+    """Get status of a task and print it."""
+    try:
+        data = await get_task_status_data(task_id)
+        if not data:
             logger.error(f"Task {task_id} not found")
             return
 
-        logger.info(f"\n📊 Task Status: {task_id[:8]}...")
-        logger.info(f"Description: {task[1]}")
-        logger.info(f"Status: {task[2]}")
-        logger.info(f"Created: {task[4]}")
+        if RICH_AVAILABLE:
+            console.print(f"\n[bold blue]📊 Task Status: {task_id[:8]}...[/bold blue]")
+            console.print(f"Description: [bold]{data['description']}[/bold]")
+            console.print(f"Status: [bold green]{data['status']}[/bold green]" if data['status'] == 'completed' else f"Status: [bold yellow]{data['status']}[/bold yellow]")
+            console.print(f"Created: {data['created_at']}")
 
-        agents = await db_query_all('SELECT agent_type, status, result FROM agents WHERE task_id = ?', (task_id,))
+            table = Table(title="Agents")
+            table.add_column("Agent Type", style="cyan")
+            table.add_column("Status", style="magenta")
+            table.add_column("Result", style="green")
 
-        logger.info(f"\nAgents ({len(agents)}):")
-        for agent_type, status, result in agents:
-            logger.info(f"  - {agent_type}: {status}")
-            if status == 'failed' and result:
-                logger.info(f"    Error: {result}")
-            if status == 'completed' and result:
-                # result might be JSON or string
-                logger.info(f"    Result: {result[:100]}...")
+            for agent in data['agents']:
+                result_text = str(agent['result'])[:100] + "..." if agent['result'] and len(str(agent['result'])) > 100 else str(agent['result']) or ""
+                status_style = "green" if agent['status'] == 'completed' else "red" if agent['status'] == 'failed' else "yellow"
+                table.add_row(agent['type'], f"[{status_style}]{agent['status']}[/{status_style}]", result_text)
+
+            console.print(table)
+        else:
+            logger.info(f"\n📊 Task Status: {task_id[:8]}...")
+            logger.info(f"Description: {data['description']}")
+            logger.info(f"Status: {data['status']}")
+            logger.info(f"Created: {data['created_at']}")
+
+            logger.info(f"\nAgents ({len(data['agents'])}):")
+            for agent in data['agents']:
+                logger.info(f"  - {agent['type']}: {agent['status']}")
+                if agent['status'] == 'failed' and agent['result']:
+                    logger.info(f"    Error: {agent['result']}")
+                if agent['status'] == 'completed' and agent['result']:
+                    logger.info(f"    Result: {str(agent['result'])[:100]}...")
 
     except Exception as e:
         logger.error(f"Error getting status: {e}")
 
+async def get_all_tasks() -> List[Dict]:
+    """Get all tasks."""
+    tasks = await db_query_all('SELECT id, description, status, created_at FROM tasks ORDER BY created_at DESC')
+    return [
+        {"id": t[0], "description": t[1], "status": t[2], "created_at": t[3]}
+        for t in tasks
+    ]
+
 async def list_tasks():
-    """List all tasks."""
+    """List all tasks and print them."""
     try:
-        tasks = await db_query_all('SELECT id, description, status, created_at FROM tasks ORDER BY created_at DESC')
+        tasks = await get_all_tasks()
 
-        logger.info(f"\n📋 All Tasks ({len(tasks)} total):")
-        logger.info("-" * 80)
+        if RICH_AVAILABLE:
+            table = Table(title=f"All Tasks ({len(tasks)} total)")
+            table.add_column("ID", style="cyan", no_wrap=True)
+            table.add_column("Status", style="magenta")
+            table.add_column("Description", style="white")
+            table.add_column("Created At", style="green")
 
-        for task_id, desc, status, created in tasks:
-            logger.info(f"{task_id[:8]}... | {status:12} | {desc[:40]}... | {created}")
+            for t in tasks:
+                status_style = "green" if t['status'] == 'completed' else "red" if t['status'] == 'failed' else "yellow"
+                table.add_row(t['id'][:8], f"[{status_style}]{t['status']}[/{status_style}]", t['description'][:50] + "...", t['created_at'])
+
+            console.print(table)
+        else:
+            logger.info(f"\n📋 All Tasks ({len(tasks)} total):")
+            logger.info("-" * 80)
+
+            for t in tasks:
+                logger.info(f"{t['id'][:8]}... | {t['status']:12} | {t['description'][:40]}... | {t['created_at']}")
     except Exception as e:
         logger.error(f"Error listing tasks: {e}")
 
 async def async_main():
+    setup_logging()
+    register_signal_handlers()
+
     parser = argparse.ArgumentParser(description='Agent Swarm Orchestrator')
     parser.add_argument('--task', help='Task description')
     parser.add_argument('--team', help='Comma-separated agent types (e.g., code-writer,tester)')
