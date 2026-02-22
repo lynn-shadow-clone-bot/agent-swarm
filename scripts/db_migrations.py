@@ -98,6 +98,73 @@ def apply_migrations():
                 last_updated TIMESTAMP
             );
             '''
+        ],
+        4: [
+            '''
+            CREATE TABLE IF NOT EXISTS agent_registry (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL,
+                model TEXT DEFAULT 'kimi-coding/k2p5',
+                thinking TEXT DEFAULT 'high',
+                description TEXT,
+                capabilities TEXT,
+                status TEXT DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            ''',
+            # Seed with default agents from JSON templates
+            '''INSERT OR IGNORE INTO agent_registry (id, name, type, model, thinking, description, capabilities) VALUES
+                ('code-writer', 'Code Writer', 'code-writer', 'kimi-coding/k2p5', 'high', 
+                 'Senior software engineer. Writes clean, efficient, well-documented code.',
+                 'implementation,coding,development');
+            ''',
+            '''INSERT OR IGNORE INTO agent_registry (id, name, type, model, thinking, description, capabilities) VALUES
+                ('code-reviewer', 'Code Reviewer', 'code-reviewer', 'kimi-coding/k2p5', 'high',
+                 'Analyzes code for bugs, security issues, performance problems, and style violations.',
+                 'review,quality,security');
+            ''',
+            '''INSERT OR IGNORE INTO agent_registry (id, name, type, model, thinking, description, capabilities) VALUES
+                ('tester', 'Tester', 'tester', 'kimi-coding/k2p5', 'high',
+                 'Writes comprehensive tests and performs QA. Ensures code works as expected.',
+                 'testing,qa,validation');
+            ''',
+            '''INSERT OR IGNORE INTO agent_registry (id, name, type, model, thinking, description, capabilities) VALUES
+                ('researcher', 'Researcher', 'researcher', 'kimi-coding/k2p5', 'high',
+                 'Conducts web research and finds documentation. Discovers solutions and best practices.',
+                 'research,discovery,documentation');
+            ''',
+            # Additional useful agents
+            '''INSERT OR IGNORE INTO agent_registry (id, name, type, model, thinking, description, capabilities) VALUES
+                ('debugger', 'Debugger', 'debugger', 'kimi-coding/k2p5', 'high',
+                 'Expert at finding and fixing bugs. Analyzes error logs and traces issues to root cause.',
+                 'debugging,troubleshooting,error-analysis');
+            ''',
+            '''INSERT OR IGNORE INTO agent_registry (id, name, type, model, thinking, description, capabilities) VALUES
+                ('architect', 'System Architect', 'architect', 'kimi-coding/k2p5', 'high',
+                 'Designs system architecture and makes high-level technical decisions. Plans scalable solutions.',
+                 'architecture,design,planning,system-design');
+            ''',
+            '''INSERT OR IGNORE INTO agent_registry (id, name, type, model, thinking, description, capabilities) VALUES
+                ('documenter', 'Documenter', 'documenter', 'kimi-coding/k2p5', 'high',
+                 'Writes clear documentation, comments, and guides. Explains complex concepts simply.',
+                 'documentation,writing,guides,explanations');
+            ''',
+            '''INSERT OR IGNORE INTO agent_registry (id, name, type, model, thinking, description, capabilities) VALUES
+                ('optimizer', 'Optimizer', 'optimizer', 'kimi-coding/k2p5', 'high',
+                 'Improves performance and refactors code. Finds bottlenecks and optimizes resource usage.',
+                 'optimization,performance,refactoring');
+            ''',
+            '''INSERT OR IGNORE INTO agent_registry (id, name, type, model, thinking, description, capabilities) VALUES
+                ('devops', 'DevOps Engineer', 'devops', 'kimi-coding/k2p5', 'high',
+                 'Handles deployment, CI/CD, infrastructure, and operational tasks.',
+                 'devops,deployment,cicd,infrastructure,docker,kubernetes');
+            ''',
+            '''INSERT OR IGNORE INTO agent_registry (id, name, type, model, thinking, description, capabilities) VALUES
+                ('security-expert', 'Security Expert', 'security-expert', 'kimi-coding/k2p5', 'high',
+                 'Audits code for security vulnerabilities. Implements secure coding practices.',
+                 'security,auditing,vulnerabilities,secure-coding');
+            '''
         ]
     }
 
