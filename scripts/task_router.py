@@ -9,9 +9,9 @@ import os
 from typing import Dict, List, Tuple
 
 try:
-    from db_config import DB_PATH, DB_TIMEOUT
+    from db import DB_PATH, DB_TIMEOUT
 except ImportError:
-    from scripts.db_config import DB_PATH, DB_TIMEOUT
+    from scripts.db import DB_PATH, DB_TIMEOUT
 
 class TaskRouter:
     """Routes tasks to appropriate agents based on decomposition."""
