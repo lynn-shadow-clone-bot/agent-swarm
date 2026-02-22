@@ -130,24 +130,39 @@ class TaskRouter:
     
     def assign_tasks(self, task_id: str, subtasks: List[Dict]):
         """Assign subtasks to agents in database."""
-        for subtask in subtasks:
-            # Find agent of this type for this task
-            self.cursor.execute('''
-                SELECT id FROM agents 
-                WHERE task_id = ? AND agent_type = ? AND status = 'active'
-            ''', (task_id, subtask["agent_type"]))
+        # Find all active agents for this task
+        self.cursor.execute('''
+            SELECT id, agent_type FROM agents
+            WHERE task_id = ? AND status = 'active'
+        ''', (task_id,))
+
+        # Map agent_type -> agent_id
+        available_agents = {}
+        for row in self.cursor.fetchall():
+            agent_id, agent_type = row
+            if agent_type not in available_agents:
+                available_agents[agent_type] = []
+            available_agents[agent_type].append(agent_id)
             
-            agent = self.cursor.fetchone()
-            if agent:
-                # Store subtask assignment
-                self.cursor.execute('''
-                    UPDATE agents 
-                    SET result = ?
-                    WHERE id = ?
-                ''', (json.dumps(subtask), agent[0]))
+        updates = []
+        for subtask in subtasks:
+            agent_type = subtask["agent_type"]
+            # Check if we have an agent for this subtask
+            if agent_type in available_agents and available_agents[agent_type]:
+                # Pick the first available agent of this type
+                agent_id = available_agents[agent_type][0]
                 
+                updates.append((json.dumps(subtask), agent_id))
                 print(f"  Assigned to {subtask['agent_type']}: {subtask['task'][:50]}...")
         
+        # Batch update all agents
+        if updates:
+            self.cursor.executemany('''
+                UPDATE agents
+                SET result = ?
+                WHERE id = ?
+            ''', updates)
+
         self.conn.commit()
     
     def get_execution_order(self, task_id: str) -> List[Tuple[str, str]]:
