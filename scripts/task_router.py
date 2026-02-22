@@ -8,7 +8,7 @@ import sqlite3
 import os
 from typing import Dict, List, Tuple
 
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'swarm.db')
+DB_PATH = os.environ.get('SWARM_DB', os.path.join(os.path.dirname(__file__), '..', 'swarm.db'))
 DB_TIMEOUT = 30.0
 
 class TaskRouter:

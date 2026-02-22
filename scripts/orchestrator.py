@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 # Database setup
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'swarm.db')
+DB_PATH = os.environ.get('SWARM_DB', os.path.join(os.path.dirname(__file__), '..', 'swarm.db'))
 DB_TIMEOUT = 30.0
 
 def init_db():
