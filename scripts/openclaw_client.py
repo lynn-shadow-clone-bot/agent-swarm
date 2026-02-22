@@ -1,4 +1,4 @@
-import subprocess
+import asyncio
 import json
 import logging
 import os
@@ -6,10 +6,10 @@ from typing import Dict, Any, Optional
 
 try:
     from scripts.config_loader import config
-    from scripts.utils import retry
+    from scripts.utils import async_retry
 except ImportError:
     from config_loader import config
-    from utils import retry
+    from utils import async_retry
 
 logger = logging.getLogger('openclaw_client')
 
@@ -18,8 +18,8 @@ class OpenClawClient:
         self.gateway = config.openclaw.gateway
         self.retries = config.openclaw.retries
 
-    def _run_command(self, args: list) -> Dict[str, Any]:
-        """Run openclaw CLI command."""
+    async def _run_command(self, args: list) -> Dict[str, Any]:
+        """Run openclaw CLI command asynchronously."""
         cmd = ["openclaw"] + args
 
         # Inject gateway into environment
@@ -29,15 +29,20 @@ class OpenClawClient:
         logger.debug(f"Running command: {' '.join(cmd)}")
 
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                env=env,
-                check=True
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env
             )
 
-            output = result.stdout.strip()
+            stdout, stderr = await process.communicate()
+
+            if process.returncode != 0:
+                logger.error(f"OpenClaw command failed: {stderr.decode().strip()}")
+                raise RuntimeError(f"OpenClaw error: {stderr.decode().strip()}")
+
+            output = stdout.decode().strip()
             if not output:
                 return {}
 
@@ -47,15 +52,12 @@ class OpenClawClient:
                 # Fallback if output is not JSON
                 return {"raw_output": output, "status": "ok"}
 
-        except subprocess.CalledProcessError as e:
-            logger.error(f"OpenClaw command failed: {e.stderr}")
-            raise RuntimeError(f"OpenClaw error: {e.stderr}")
         except FileNotFoundError:
              logger.error("OpenClaw CLI not found")
              raise RuntimeError("OpenClaw CLI not installed")
 
-    @retry(max_retries=3, exceptions=(RuntimeError,))
-    def spawn_agent(self, task: str, label: str, model: str, thinking: str = "high") -> str:
+    @async_retry(max_retries=3, exceptions=(RuntimeError,))
+    async def spawn_agent(self, task: str, label: str, model: str, thinking: str = "high") -> str:
         """Spawn an agent and return session ID."""
         args = [
             "spawn",
@@ -65,7 +67,7 @@ class OpenClawClient:
             "--thinking", thinking,
             "--json"
         ]
-        response = self._run_command(args)
+        response = await self._run_command(args)
 
         # Try different possible keys for ID
         session_id = response.get("session_id") or response.get("id") or response.get("uuid")
@@ -84,8 +86,8 @@ class OpenClawClient:
 
         return session_id
 
-    @retry(max_retries=3, exceptions=(RuntimeError,))
-    def send_message(self, session_id: str, message: str) -> Dict[str, Any]:
+    @async_retry(max_retries=3, exceptions=(RuntimeError,))
+    async def send_message(self, session_id: str, message: str) -> Dict[str, Any]:
         """Send message to agent session."""
         args = [
             "send",
@@ -93,17 +95,17 @@ class OpenClawClient:
             "--message", message,
             "--json"
         ]
-        return self._run_command(args)
+        return await self._run_command(args)
 
-    @retry(max_retries=3, exceptions=(RuntimeError,))
-    def get_status(self, session_id: str) -> Dict[str, Any]:
+    @async_retry(max_retries=3, exceptions=(RuntimeError,))
+    async def get_status(self, session_id: str) -> Dict[str, Any]:
         """Get session status."""
         args = [
             "status",
             "--session", session_id,
             "--json"
         ]
-        return self._run_command(args)
+        return await self._run_command(args)
 
 # Global client
 client = OpenClawClient()

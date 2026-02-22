@@ -66,6 +66,19 @@ def apply_migrations():
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             '''
+        ],
+        2: [
+            '''
+            ALTER TABLE agents ADD COLUMN priority INTEGER DEFAULT 0;
+            ''',
+            '''
+            CREATE TABLE IF NOT EXISTS task_cache (
+                task_hash TEXT PRIMARY KEY,
+                agent_type TEXT,
+                result TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            '''
         ]
     }
 
