@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Agent Swarm Orchestrator
-Coordinates multi-agent teams for complex tasks.
+Coordinates multi-agent teams for complex tasks (Async, Scalable).
 """
 
 import argparse
@@ -13,8 +13,11 @@ import signal
 import logging
 import logging.handlers
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import time
+import asyncio
+import hashlib
+from itertools import groupby
 
 # Add scripts dir to path if running directly
 if __name__ == '__main__':
@@ -22,13 +25,13 @@ if __name__ == '__main__':
 
 try:
     from scripts.config_loader import config
-    from scripts.db_config import get_connection, DB_PATH
+    from scripts.db_config import get_pool
     from scripts.db_migrations import apply_migrations
     from scripts.openclaw_client import client as openclaw_client
     from scripts.observability import metrics, tracing, alerts
 except ImportError:
     from config_loader import config
-    from db_config import get_connection, DB_PATH
+    from db_config import get_pool
     from db_migrations import apply_migrations
     from openclaw_client import client as openclaw_client
     from observability import metrics, tracing, alerts
@@ -82,14 +85,67 @@ def signal_handler(signum, frame):
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
+# --- DB Helpers ---
+
+def _run_sql(sql, params=(), fetch=None, commit=False):
+    pool = get_pool()
+    conn = pool.get_connection()
+    try:
+        c = conn.cursor()
+        c.execute(sql, params)
+        res = None
+        if fetch == 'one':
+            res = c.fetchone()
+        elif fetch == 'all':
+            res = c.fetchall()
+
+        if commit:
+            conn.commit()
+        return res
+    except Exception as e:
+        if commit:
+            conn.rollback()
+        raise e
+    finally:
+        pool.return_connection(conn)
+
+async def db_execute(sql, params=(), commit=False):
+    return await asyncio.to_thread(_run_sql, sql, params, commit=commit)
+
+async def db_query_one(sql, params=()):
+    return await asyncio.to_thread(_run_sql, sql, params, fetch='one')
+
+async def db_query_all(sql, params=()):
+    return await asyncio.to_thread(_run_sql, sql, params, fetch='all')
+
+# --- Caching Helpers ---
+
+def _get_task_hash(agent_type: str, task_description: str) -> str:
+    content = f"{agent_type}:{task_description}"
+    return hashlib.sha256(content.encode()).hexdigest()
+
+async def check_cache(agent_type: str, task_description: str) -> Optional[str]:
+    """Check if result exists in cache."""
+    task_hash = _get_task_hash(agent_type, task_description)
+    row = await db_query_one('SELECT result FROM task_cache WHERE task_hash = ?', (task_hash,))
+    if row:
+        logger.info(f"Cache HIT for {agent_type}")
+        return row[0]
+    return None
+
+async def save_cache(agent_type: str, task_description: str, result: str):
+    """Save result to cache."""
+    task_hash = _get_task_hash(agent_type, task_description)
+    await db_execute('''
+        INSERT OR REPLACE INTO task_cache (task_hash, agent_type, result, created_at)
+        VALUES (?, ?, ?, ?)
+    ''', (task_hash, agent_type, result, datetime.now().isoformat()), commit=True)
+
+
 # --- Logic ---
 
 def load_agent_template(agent_type: str) -> Dict:
     """Load agent template from references."""
-    # We maintain this dictionary as a fallback/reference,
-    # but ideally should sync with agent_pool or agent_templates dir.
-    # For this phase, we keep the existing logic structure.
-    
     templates = {
         "code-writer": {
             "agent_id": "code-writer",
@@ -185,44 +241,49 @@ def ask_clarifying_questions(task: str) -> Dict:
         "tech_stack": answers.get("q4", "auto-detect")
     }
 
-def assemble_team(task: str, team_types: List[str], clarifications: Dict) -> str:
+async def assemble_team(task: str, team_types: List[str], clarifications: Dict) -> str:
     """Assemble agent team and return task ID."""
     with tracing.get_tracer().start_as_current_span("assemble_team") as span:
         span.set_attribute("task.description", task)
         span.set_attribute("team.size", len(team_types))
 
         task_id = str(uuid.uuid4())
-        conn = get_connection()
+
         try:
-            c = conn.cursor()
+            def _assemble_transaction():
+                pool = get_pool()
+                conn = pool.get_connection()
+                try:
+                    c = conn.cursor()
+                    c.execute('''
+                        INSERT INTO tasks (id, description, status, team_config)
+                        VALUES (?, ?, ?, ?)
+                    ''', (task_id, task, 'assembling', json.dumps(team_types)))
 
-            # Create task
-            c.execute('''
-                INSERT INTO tasks (id, description, status, team_config)
-                VALUES (?, ?, ?, ?)
-            ''', (task_id, task, 'assembling', json.dumps(team_types)))
+                    for agent_type in team_types:
+                        agent_id = str(uuid.uuid4())
+                        c.execute('''
+                            INSERT INTO agents (id, task_id, agent_type, status, priority)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', (agent_id, task_id, agent_type, 'pending', 0))
 
-            # Create agents
-            for agent_type in team_types:
-                agent_id = str(uuid.uuid4())
-                c.execute('''
-                    INSERT INTO agents (id, task_id, agent_type, status)
-                    VALUES (?, ?, ?, ?)
-                ''', (agent_id, task_id, agent_type, 'pending'))
+                    conn.commit()
+                except Exception as e:
+                    conn.rollback()
+                    raise e
+                finally:
+                    pool.return_connection(conn)
 
-            conn.commit()
+            await asyncio.to_thread(_assemble_transaction)
 
             metrics.tasks_created.inc()
             return task_id
         except Exception as e:
             logger.error(f"Failed to assemble team: {e}")
             alerts.send_alert("ERROR", f"Failed to assemble team: {e}", {"task": task})
-            conn.rollback()
             raise
-        finally:
-            conn.close()
 
-def spawn_agents(task_id: str):
+async def spawn_agents(task_id: str):
     """Spawn all agents for a task using OpenClaw."""
     with tracing.get_tracer().start_as_current_span("spawn_agents") as span:
         span.set_attribute("task.id", task_id)
@@ -230,195 +291,223 @@ def spawn_agents(task_id: str):
         if SHUTDOWN_REQUESTED:
             return
 
-        conn = get_connection()
-        try:
-            c = conn.cursor()
+        agents_list = await db_query_all('SELECT id, agent_type FROM agents WHERE task_id = ? AND status = ?', (task_id, 'pending'))
 
-            c.execute('SELECT id, agent_type FROM agents WHERE task_id = ? AND status = ?',
-                      (task_id, 'pending'))
-            agents_list = c.fetchall()
+        logger.info(f"\n🚀 Spawning {len(agents_list)} agents...")
 
-            logger.info(f"\n🚀 Spawning {len(agents_list)} agents...")
+        async def _spawn_single(agent_id, agent_type):
+            if SHUTDOWN_REQUESTED:
+                return False
 
-            failed_count = 0
-            for agent_id, agent_type in agents_list:
-                if SHUTDOWN_REQUESTED:
-                    logger.info("Shutdown requested, stopping spawn...")
-                    break
+            template = load_agent_template(agent_type)
+            logger.info(f"  Spawning {agent_type}...")
 
-                template = load_agent_template(agent_type)
+            try:
+                with tracing.get_tracer().start_as_current_span("spawn_single_agent") as agent_span:
+                    agent_span.set_attribute("agent.type", agent_type)
 
-                logger.info(f"  Spawning {agent_type}...")
+                    session_key = await openclaw_client.spawn_agent(
+                        task=f"Task: {task_id}. Role: {agent_type}. {template.get('system_prompt', '')}",
+                        label=f"{agent_type}-{task_id[:8]}",
+                        model=template.get("model", "kimi-coding/k2p5"),
+                        thinking=template.get("thinking", "high")
+                    )
 
+                    await db_execute('''
+                        UPDATE agents
+                        SET status = ?, session_key = ?, spawned_at = ?
+                        WHERE id = ?
+                    ''', ('active', session_key, datetime.now().isoformat(), agent_id), commit=True)
+
+                    await db_execute('''
+                        INSERT INTO messages (task_id, agent_id, message_type, content)
+                        VALUES (?, ?, ?, ?)
+                    ''', (task_id, agent_id, 'SPAWNED', f'Agent {agent_type} ready: {session_key}'), commit=True)
+
+                    metrics.agents_spawned.labels(agent_type=agent_type).inc()
+                    metrics.active_agents.inc()
+                    return True
+
+            except Exception as e:
+                logger.error(f"Failed to spawn agent {agent_type}: {e}")
+                await db_execute('UPDATE agents SET status = ?, result = ? WHERE id = ?',
+                          ('failed', str(e), agent_id), commit=True)
+                metrics.agents_failed.labels(agent_type=agent_type).inc()
+                alerts.send_alert("ERROR", f"Failed to spawn agent {agent_type}: {e}", {"task_id": task_id})
+                return False
+
+        results = await asyncio.gather(*[_spawn_single(aid, atype) for aid, atype in agents_list])
+
+        failed_count = results.count(False)
+
+        if failed_count > 0:
+            logger.error(f"{failed_count} agents failed to spawn. Marking task as failed.")
+            await db_execute('UPDATE tasks SET status = ? WHERE id = ?', ('failed', task_id), commit=True)
+        elif not SHUTDOWN_REQUESTED:
+            await db_execute('UPDATE tasks SET status = ? WHERE id = ?', ('executing', task_id), commit=True)
+
+        logger.info(f"\n✅ All agents processed for task {task_id[:8]}...")
+
+async def execute_task(task_id: str):
+    """Execute task with agent team (Async, Prioritized, Cached)."""
+    with tracing.get_tracer().start_as_current_span("execute_task") as span:
+        span.set_attribute("task.id", task_id)
+        start_time = time.time()
+
+        task_row = await db_query_one('SELECT description, status, team_config FROM tasks WHERE id = ?', (task_id,))
+        if not task_row:
+            logger.error(f"Task {task_id} not found")
+            return
+        task_desc, status, team_config_json = task_row
+
+        if status == 'failed':
+            logger.error(f"Task {task_id} is marked as failed. Skipping execution.")
+            return
+
+        logger.info(f"\n📋 Executing: {task_desc}")
+        logger.info("="*60)
+
+        # 1. Decompose Task using TaskRouter (running in thread to avoid blocking)
+        from scripts.task_router import TaskRouter
+
+        def _decompose_and_assign():
+            router = TaskRouter()
+            try:
+                team_types = json.loads(team_config_json)
+                subtasks = router.decompose_task(task_desc, team_types)
+                router.assign_tasks(task_id, subtasks)
+                return subtasks
+            finally:
+                router.close()
+
+        await asyncio.to_thread(_decompose_and_assign)
+
+        # 2. Execute Subtasks based on Priority
+        agents = await db_query_all('''
+            SELECT id, agent_type, session_key, result, priority
+            FROM agents
+            WHERE task_id = ? AND status = 'active'
+            ORDER BY priority ASC
+        ''', (task_id,))
+
+        logger.info(f"\n🔄 Coordinating {len(agents)} agents (Prioritized)...")
+
+        failed_count = 0
+
+        async def _process_agent(agent_data):
+            agent_id, agent_type, session_key, result_json, priority = agent_data
+
+            if SHUTDOWN_REQUESTED: return False
+
+            # Parse subtask
+            subtask_desc = "Unknown task"
+            if result_json:
                 try:
-                    with tracing.get_tracer().start_as_current_span("spawn_single_agent") as agent_span:
-                        agent_span.set_attribute("agent.type", agent_type)
+                    subtask_obj = json.loads(result_json)
+                    subtask_desc = subtask_obj.get("task", subtask_desc)
+                except:
+                    pass
 
-                        session_key = openclaw_client.spawn_agent(
-                            task=f"Task: {task_id}. Role: {agent_type}. {template.get('system_prompt', '')}",
-                            label=f"{agent_type}-{task_id[:8]}",
-                            model=template.get("model", "kimi-coding/k2p5"),
-                            thinking=template.get("thinking", "high")
-                        )
+            logger.info(f"  [Priority {priority}] {agent_type}: {subtask_desc[:40]}...")
 
-                        c.execute('''
-                            UPDATE agents
-                            SET status = ?, session_key = ?, spawned_at = ?
-                            WHERE id = ?
-                        ''', ('active', session_key, datetime.now().isoformat(), agent_id))
-
-                        # Log spawn message
-                        c.execute('''
-                            INSERT INTO messages (task_id, agent_id, message_type, content)
-                            VALUES (?, ?, ?, ?)
-                        ''', (task_id, agent_id, 'SPAWNED', f'Agent {agent_type} ready: {session_key}'))
-
-                        metrics.agents_spawned.labels(agent_type=agent_type).inc()
-                        metrics.active_agents.inc()
-
-                except Exception as e:
-                    logger.error(f"Failed to spawn agent {agent_type}: {e}")
-                    c.execute('UPDATE agents SET status = ?, result = ? WHERE id = ?',
-                              ('failed', str(e), agent_id))
-
-                    metrics.agents_failed.labels(agent_type=agent_type).inc()
-                    alerts.send_alert("ERROR", f"Failed to spawn agent {agent_type}: {e}", {"task_id": task_id})
-
-                    failed_count += 1
-
-            # Update task status
-            if failed_count > 0:
-                logger.error(f"{failed_count} agents failed to spawn. Marking task as failed.")
-                c.execute('UPDATE tasks SET status = ? WHERE id = ?', ('failed', task_id))
-            elif not SHUTDOWN_REQUESTED:
-                c.execute('UPDATE tasks SET status = ? WHERE id = ?', ('executing', task_id))
-
-            conn.commit()
-            logger.info(f"\n✅ All agents processed for task {task_id[:8]}...")
-    
-        except Exception as e:
-            logger.error(f"Critical error in spawn_agents: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
-
-def execute_task(task_id: str):
-    """Execute task with agent team."""
-    conn = get_connection()
-    try:
-        with tracing.get_tracer().start_as_current_span("execute_task") as span:
-            span.set_attribute("task.id", task_id)
-            start_time = time.time()
-
-            c = conn.cursor()
-
-            # Check task status first
-            c.execute('SELECT description, status FROM tasks WHERE id = ?', (task_id,))
-            task_row = c.fetchone()
-            if not task_row:
-                logger.error(f"Task {task_id} not found")
-                return
-            task, status = task_row
-
-            if status == 'failed':
-                logger.error(f"Task {task_id} is marked as failed. Skipping execution.")
-                return
-
-            logger.info(f"\n📋 Executing: {task}")
-            logger.info("="*60)
-
-            # Get all agents
-            c.execute('SELECT id, agent_type, session_key FROM agents WHERE task_id = ?', (task_id,))
-            agents = c.fetchall()
-
-            logger.info(f"\n🔄 Coordinating {len(agents)} agents...")
-
-            failed_count = 0
-            for i, (agent_id, agent_type, session_key) in enumerate(agents, 1):
-                if SHUTDOWN_REQUESTED:
-                    break
-
-                logger.info(f"  [{i}/{len(agents)}] {agent_type} working...")
-
-                # Notify agent
-                try:
-                    if session_key and session_key != "unknown_session":
-                        openclaw_client.send_message(session_key, "Start working on your task.")
-                except Exception as e:
-                    logger.error(f"Failed to communicate with {agent_type}: {e}")
-                    c.execute('UPDATE agents SET status = ?, result = ? WHERE id = ?',
-                              ('failed', str(e), agent_id))
-                    failed_count += 1
-                    continue
-
-                c.execute('''
-                    UPDATE agents SET status = ? WHERE id = ?
-                ''', ('working', agent_id))
-
-                # Simulate completion
-                result = f"{agent_type} completed their subtask"
-
-                c.execute('''
+            # CHECK CACHE
+            cached_result = await check_cache(agent_type, subtask_desc)
+            if cached_result:
+                logger.info(f"    -> Using Cached Result for {agent_type}")
+                await db_execute('''
                     UPDATE agents
                     SET status = ?, result = ?, completed_at = ?
                     WHERE id = ?
-                ''', ('completed', result, datetime.now().isoformat(), agent_id))
+                ''', ('completed', cached_result, datetime.now().isoformat(), agent_id), commit=True)
 
-                c.execute('''
+                await db_execute('''
                     INSERT INTO messages (task_id, agent_id, message_type, content)
                     VALUES (?, ?, ?, ?)
-                ''', (task_id, agent_id, 'COMPLETED', result))
+                ''', (task_id, agent_id, 'COMPLETED', cached_result), commit=True)
+                return True
 
-            if not SHUTDOWN_REQUESTED:
-                if failed_count > 0:
-                     error_msg = f"Task failed: {failed_count} agents encountered errors."
-                     logger.error(error_msg)
-                     c.execute('''
-                        UPDATE tasks
+            # EXECUTE via OpenClaw
+            try:
+                if session_key and session_key != "unknown_session":
+                    # Send task
+                    await openclaw_client.send_message(session_key, f"Execute subtask: {subtask_desc}")
+
+                    await db_execute('UPDATE agents SET status = ? WHERE id = ?', ('working', agent_id), commit=True)
+
+                    # Simulate completion
+                    result_msg = f"{agent_type} completed: {subtask_desc}"
+
+                    # SAVE CACHE
+                    await save_cache(agent_type, subtask_desc, result_msg)
+
+                    await db_execute('''
+                        UPDATE agents
                         SET status = ?, result = ?, completed_at = ?
                         WHERE id = ?
-                    ''', ('failed', error_msg, datetime.now().isoformat(), task_id))
+                    ''', ('completed', result_msg, datetime.now().isoformat(), agent_id), commit=True)
 
-                     metrics.tasks_failed.inc()
-                     alerts.send_alert("ERROR", error_msg, {"task_id": task_id})
-                else:
-                    # Mark task complete
-                    final_result = f"Task completed by {len(agents)} agents. All subtasks finished."
+                    await db_execute('''
+                        INSERT INTO messages (task_id, agent_id, message_type, content)
+                        VALUES (?, ?, ?, ?)
+                    ''', (task_id, agent_id, 'COMPLETED', result_msg), commit=True)
+                    return True
+            except Exception as e:
+                logger.error(f"Failed to communicate with {agent_type}: {e}")
+                await db_execute('UPDATE agents SET status = ?, result = ? WHERE id = ?',
+                          ('failed', str(e), agent_id), commit=True)
+                return False
 
-                    c.execute('''
-                        UPDATE tasks
-                        SET status = ?, result = ?, completed_at = ?
-                        WHERE id = ?
-                    ''', ('completed', final_result, datetime.now().isoformat(), task_id))
+        # Group agents by priority and execute groups sequentially
+        agents_by_priority = {}
+        for a in agents:
+            p = a[4] # priority
+            if p not in agents_by_priority: agents_by_priority[p] = []
+            agents_by_priority[p].append(a)
 
-                    logger.info("\n" + "="*60)
-                    logger.info("✅ TASK COMPLETED!")
-                    logger.info("="*60)
-                    logger.info(f"\nTask ID: {task_id}")
-                    logger.info(f"Agents: {len(agents)}")
-                    logger.info(f"Status: 100% COMPLETE")
-                    logger.info(f"\n{final_result}")
+        sorted_priorities = sorted(agents_by_priority.keys())
 
-                    metrics.tasks_completed.inc()
-                    metrics.task_duration.observe(time.time() - start_time)
+        for p in sorted_priorities:
+            if SHUTDOWN_REQUESTED: break
+            group = agents_by_priority[p]
+            logger.info(f"  --- Executing Priority Group {p} ({len(group)} agents) ---")
 
-            conn.commit()
-    
-    except Exception as e:
-        logger.error(f"Critical error in execute_task: {e}")
-        alerts.send_alert("CRITICAL", f"Critical error in execute_task: {e}", {"task_id": task_id})
-        conn.rollback()
-    finally:
-        conn.close()
+            group_results = await asyncio.gather(*[_process_agent(a) for a in group])
+            failed_count += group_results.count(False)
 
-def get_status(task_id: str):
+        if not SHUTDOWN_REQUESTED:
+            if failed_count > 0:
+                 error_msg = f"Task failed: {failed_count} agents encountered errors."
+                 logger.error(error_msg)
+                 await db_execute('''
+                    UPDATE tasks
+                    SET status = ?, result = ?, completed_at = ?
+                    WHERE id = ?
+                ''', ('failed', error_msg, datetime.now().isoformat(), task_id), commit=True)
+
+                 metrics.tasks_failed.inc()
+                 alerts.send_alert("ERROR", error_msg, {"task_id": task_id})
+            else:
+                final_result = f"Task completed by {len(agents)} agents. All subtasks finished."
+                await db_execute('''
+                    UPDATE tasks
+                    SET status = ?, result = ?, completed_at = ?
+                    WHERE id = ?
+                ''', ('completed', final_result, datetime.now().isoformat(), task_id), commit=True)
+
+                logger.info("\n" + "="*60)
+                logger.info("✅ TASK COMPLETED!")
+                logger.info("="*60)
+                logger.info(f"\nTask ID: {task_id}")
+                logger.info(f"Agents: {len(agents)}")
+                logger.info(f"Status: 100% COMPLETE")
+
+                metrics.tasks_completed.inc()
+                metrics.task_duration.observe(time.time() - start_time)
+
+async def get_status(task_id: str):
     """Get status of a task."""
-    conn = get_connection()
     try:
-        c = conn.cursor()
-
-        c.execute('SELECT * FROM tasks WHERE id = ?', (task_id,))
-        task = c.fetchone()
+        task = await db_query_one('SELECT * FROM tasks WHERE id = ?', (task_id,))
 
         if not task:
             logger.error(f"Task {task_id} not found")
@@ -429,40 +518,34 @@ def get_status(task_id: str):
         logger.info(f"Status: {task[2]}")
         logger.info(f"Created: {task[4]}")
 
-        c.execute('SELECT agent_type, status FROM agents WHERE task_id = ?', (task_id,))
-        agents = c.fetchall()
+        agents = await db_query_all('SELECT agent_type, status, result FROM agents WHERE task_id = ?', (task_id,))
 
         logger.info(f"\nAgents ({len(agents)}):")
-        for agent_type, status in agents:
+        for agent_type, status, result in agents:
             logger.info(f"  - {agent_type}: {status}")
-            if status == 'failed':
-                 # Check if there is a result (error message)
-                 c.execute('SELECT result FROM agents WHERE task_id = ? AND agent_type = ?', (task_id, agent_type))
-                 res = c.fetchone()
-                 if res and res[0]:
-                     logger.info(f"    Error: {res[0]}")
+            if status == 'failed' and result:
+                logger.info(f"    Error: {result}")
+            if status == 'completed' and result:
+                # result might be JSON or string
+                logger.info(f"    Result: {result[:100]}...")
 
-    finally:
-        conn.close()
+    except Exception as e:
+        logger.error(f"Error getting status: {e}")
 
-def list_tasks():
+async def list_tasks():
     """List all tasks."""
-    conn = get_connection()
     try:
-        c = conn.cursor()
-
-        c.execute('SELECT id, description, status, created_at FROM tasks ORDER BY created_at DESC')
-        tasks = c.fetchall()
+        tasks = await db_query_all('SELECT id, description, status, created_at FROM tasks ORDER BY created_at DESC')
 
         logger.info(f"\n📋 All Tasks ({len(tasks)} total):")
         logger.info("-" * 80)
 
         for task_id, desc, status, created in tasks:
             logger.info(f"{task_id[:8]}... | {status:12} | {desc[:40]}... | {created}")
-    finally:
-        conn.close()
+    except Exception as e:
+        logger.error(f"Error listing tasks: {e}")
 
-def main():
+async def async_main():
     parser = argparse.ArgumentParser(description='Agent Swarm Orchestrator')
     parser.add_argument('--task', help='Task description')
     parser.add_argument('--team', help='Comma-separated agent types (e.g., code-writer,tester)')
@@ -480,18 +563,18 @@ def main():
     metrics.start_server()
 
     if args.list:
-        list_tasks()
+        await list_tasks()
         return
     
     if args.status and args.task_id:
-        get_status(args.task_id)
+        await get_status(args.task_id)
         return
     
     if args.task and args.team:
         # Parse team
         team_types = [t.strip() for t in args.team.split(',')]
         
-        # Step 1: Clarify with orchestrator
+        # Step 1: Clarify (Sync)
         clarifications = ask_clarifying_questions(args.task)
         
         logger.info("\n" + "="*60)
@@ -503,7 +586,7 @@ def main():
              return
 
         # Step 2: Assemble team
-        task_id = assemble_team(args.task, team_types, clarifications)
+        task_id = await assemble_team(args.task, team_types, clarifications)
         
         logger.info(f"\n📝 Task ID: {task_id}")
         logger.info(f"👥 Team: {', '.join(team_types)}")
@@ -513,20 +596,26 @@ def main():
              return
 
         # Step 3: Spawn agents
-        spawn_agents(task_id)
+        await spawn_agents(task_id)
         
         if SHUTDOWN_REQUESTED:
              logger.info("Shutdown requested.")
              return
 
         # Step 4: Execute
-        execute_task(task_id)
+        await execute_task(task_id)
         
         logger.info(f"\n💡 Check status anytime:")
         logger.info(f"   python3 scripts/orchestrator.py --status --task-id {task_id}")
         
     else:
         parser.print_help()
+
+def main():
+    try:
+        asyncio.run(async_main())
+    except KeyboardInterrupt:
+        pass
 
 if __name__ == '__main__':
     main()

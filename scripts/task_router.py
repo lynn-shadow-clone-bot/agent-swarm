@@ -152,15 +152,15 @@ class TaskRouter:
             for subtask in subtasks:
                 agent_id = agents_map.get(subtask["agent_type"])
                 if agent_id:
-                    updates.append((json.dumps(subtask), agent_id))
-                    print(f"  Assigned to {subtask['agent_type']}: {subtask['task'][:50]}...")
+                    updates.append((json.dumps(subtask), subtask.get('priority', 0), agent_id))
+                    print(f"  Assigned to {subtask['agent_type']}: {subtask['task'][:50]}... (Priority: {subtask.get('priority', 0)})")
                 else:
                     print(f"  Warning: No active agent found for {subtask['agent_type']}")
 
             if updates:
                 self.cursor.executemany('''
                     UPDATE agents
-                    SET result = ?
+                    SET result = ?, priority = ?
                     WHERE id = ?
                 ''', updates)
                 self.conn.commit()
