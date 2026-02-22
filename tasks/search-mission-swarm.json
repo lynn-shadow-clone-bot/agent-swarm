@@ -1,0 +1,46 @@
+{
+  "task": "Fix eBay/Search Mission Browser Tool Issue in ShadowCMD",
+  "orchestrator": {
+    "model": "kimi-coding/k2p5",
+    "thinking": "high"
+  },
+  "team": ["debugger", "architect", "code-writer", "tester"],
+  "agents": {
+    "debugger": {
+      "agent_id": "debugger-glm",
+      "model": "nvidia/z-ai/glm4.7",
+      "thinking": "high",
+      "system_prompt": "You are a debugging expert specialized in browser automation and OpenClaw integrations. Analyze the Search Mission system to find why browser tool calls fail with 0 results. Focus on: 1) Cron job configuration, 2) Sub-agent spawning, 3) Browser tool profile settings, 4) Chrome Relay vs Headless mode. Document your findings with specific file paths and line numbers."
+    },
+    "architect": {
+      "agent_id": "architect-glm", 
+      "model": "nvidia/z-ai/glm4.7",
+      "thinking": "high",
+      "system_prompt": "You are a system architect. Design a robust solution for the browser tool issue in the Search Mission system. Consider: 1) Proper isolation of cron jobs, 2) Browser tool configuration (headless vs Chrome Relay), 3) Error handling and retry logic, 4) Monitoring and logging. Create a clear implementation plan with file changes."
+    },
+    "code-writer": {
+      "agent_id": "writer-glm",
+      "model": "nvidia/z-ai/glm4.7",
+      "thinking": "high",
+      "system_prompt": "You are a senior software engineer. Implement the fix for the browser tool issue based on the architect's plan and debugger's findings. Modify: 1) Cron job message configuration, 2) Browser tool invocation, 3) Error handling. Write clean, working code. Test your changes."
+    },
+    "tester": {
+      "agent_id": "tester-glm",
+      "model": "nvidia/z-ai/glm4.7",
+      "thinking": "high",
+      "system_prompt": "You are a QA engineer. Validate the browser tool fix. Create test cases for: 1) Cron job spawning sub-agent, 2) Browser tool execution, 3) Search results returning >0 items, 4) Error handling. Run tests and report pass/fail with evidence."
+    }
+  },
+  "context": {
+    "problem": "Search Missions always complete with 0 results because Sub-Agents fail. Root cause: Browser Tool uses profile='openclaw' (Chrome Extension Relay) but isolated cron job sessions have no attached Chrome tab.",
+    "solution_direction": "Cron job message must use browser tool WITHOUT profile argument → Headless mode",
+    "key_files": [
+      "server/index.js - Cron job definition",
+      "tools/search_agent.py - Sub-agent entry point",
+      "tools/search_api.py - Browser tool invocation"
+    ],
+    "working_directory": "/home/kai/.openclaw/workspace/tasklist-app"
+  },
+  "workflow": "sequential",
+  "output_dir": "./swarm-output/search-mission-fix"
+}
