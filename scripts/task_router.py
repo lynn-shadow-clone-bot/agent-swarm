@@ -14,9 +14,9 @@ if __name__ == '__main__':
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from scripts.db_config import get_connection
+    from scripts.db_config import get_connection, DB_PATH
 except ImportError:
-    from db_config import get_connection
+    from db_config import get_connection, DB_PATH
 
 class TaskRouter:
     """Routes tasks to appropriate agents based on decomposition."""
@@ -137,32 +137,37 @@ class TaskRouter:
     
     def assign_tasks(self, task_id: str, subtasks: List[Dict]):
         """Assign subtasks to agents in database."""
-        # Note: We should use executemany for batch updates if possible,
-        # but here we need to match agent_type to id.
+        try:
+            # Note: We should use executemany for batch updates if possible,
+            # but here we need to match agent_type to id.
 
-        # Pre-fetch active agents for this task
-        self.cursor.execute('''
-            SELECT agent_type, id FROM agents
-            WHERE task_id = ? AND status = 'active'
-        ''', (task_id,))
-        agents_map = {row[0]: row[1] for row in self.cursor.fetchall()}
+            # Pre-fetch active agents for this task
+            self.cursor.execute('''
+                SELECT agent_type, id FROM agents
+                WHERE task_id = ? AND status = 'active'
+            ''', (task_id,))
+            agents_map = {row[0]: row[1] for row in self.cursor.fetchall()}
 
-        updates = []
-        for subtask in subtasks:
-            agent_id = agents_map.get(subtask["agent_type"])
-            if agent_id:
-                updates.append((json.dumps(subtask), agent_id))
-                print(f"  Assigned to {subtask['agent_type']}: {subtask['task'][:50]}...")
-            else:
-                print(f"  Warning: No active agent found for {subtask['agent_type']}")
+            updates = []
+            for subtask in subtasks:
+                agent_id = agents_map.get(subtask["agent_type"])
+                if agent_id:
+                    updates.append((json.dumps(subtask), agent_id))
+                    print(f"  Assigned to {subtask['agent_type']}: {subtask['task'][:50]}...")
+                else:
+                    print(f"  Warning: No active agent found for {subtask['agent_type']}")
 
-        if updates:
-            self.cursor.executemany('''
-                UPDATE agents
-                SET result = ?
-                WHERE id = ?
-            ''', updates)
-            self.conn.commit()
+            if updates:
+                self.cursor.executemany('''
+                    UPDATE agents
+                    SET result = ?
+                    WHERE id = ?
+                ''', updates)
+                self.conn.commit()
+        except Exception as e:
+            print(f"Error assigning tasks: {e}")
+            self.conn.rollback()
+            raise
     
     def get_execution_order(self, task_id: str) -> List[Tuple[str, str]]:
         """Get execution order based on dependencies."""
@@ -211,34 +216,38 @@ def main():
     
     router = TaskRouter()
     
-    if args.decompose:
-        # Get task info
-        # Use router's connection
-        c = router.cursor
-        
-        c.execute('SELECT description, team_config FROM tasks WHERE id = ?', (args.task_id,))
-        task = c.fetchone()
-        
-        if task:
-            description = task[0]
-            team_types = json.loads(task[1])
+    try:
+        if args.decompose:
+            # Get task info
+            # Use router's connection
+            c = router.cursor
             
-            print(f"\n🔀 Decomposing task: {description}")
-            print(f"Team: {', '.join(team_types)}")
-            print("\nSub-tasks:")
+            c.execute('SELECT description, team_config FROM tasks WHERE id = ?', (args.task_id,))
+            task = c.fetchone()
             
-            subtasks = router.decompose_task(description, team_types)
-            for i, subtask in enumerate(subtasks, 1):
-                print(f"  {i}. [{subtask['agent_type']}] {subtask['task'][:50]}...")
-                if subtask['dependencies']:
-                    print(f"     Depends on: {', '.join(subtask['dependencies'])}")
-            
-            router.assign_tasks(args.task_id, subtasks)
-            print("\n✅ Tasks assigned to agents")
-        else:
-            print(f"Task {args.task_id} not found")
-    
-    router.close()
+            if task:
+                description = task[0]
+                team_types = json.loads(task[1])
+
+                print(f"\n🔀 Decomposing task: {description}")
+                print(f"Team: {', '.join(team_types)}")
+                print("\nSub-tasks:")
+
+                subtasks = router.decompose_task(description, team_types)
+                for i, subtask in enumerate(subtasks, 1):
+                    print(f"  {i}. [{subtask['agent_type']}] {subtask['task'][:50]}...")
+                    if subtask['dependencies']:
+                        print(f"     Depends on: {', '.join(subtask['dependencies'])}")
+
+                router.assign_tasks(args.task_id, subtasks)
+                print("\n✅ Tasks assigned to agents")
+            else:
+                print(f"Task {args.task_id} not found")
+    except Exception as e:
+        print(f"Critical error in task router: {e}")
+        sys.exit(1)
+    finally:
+        router.close()
 
 
 if __name__ == '__main__':

@@ -20,13 +20,32 @@ class TestDBPath(unittest.TestCase):
         elif "SWARM_DB" in os.environ:
             del os.environ["SWARM_DB"]
 
+    def _reload_all(self):
+        """Helper to reload all config related modules."""
+        import config_loader
+        importlib.reload(config_loader)
+        if 'scripts.config_loader' in sys.modules:
+            import scripts.config_loader
+            importlib.reload(scripts.config_loader)
+
+        import db_config
+        importlib.reload(db_config)
+        if 'scripts.db_config' in sys.modules:
+            import scripts.db_config
+            importlib.reload(scripts.db_config)
+
     def test_orchestrator_db_path_env(self):
         """Test that orchestrator respects SWARM_DB environment variable."""
         os.environ["SWARM_DB"] = self.custom_db_path
 
+        self._reload_all()
+
         # We need to reload the module because it might have been imported already
         import orchestrator
         importlib.reload(orchestrator)
+        if 'scripts.orchestrator' in sys.modules:
+            import scripts.orchestrator
+            importlib.reload(scripts.orchestrator)
 
         self.assertEqual(orchestrator.DB_PATH, self.custom_db_path)
 
@@ -34,9 +53,14 @@ class TestDBPath(unittest.TestCase):
         """Test that task_router respects SWARM_DB environment variable."""
         os.environ["SWARM_DB"] = self.custom_db_path
 
+        self._reload_all()
+
         # We need to reload the module because it might have been imported already
         import task_router
         importlib.reload(task_router)
+        if 'scripts.task_router' in sys.modules:
+            import scripts.task_router
+            importlib.reload(scripts.task_router)
 
         self.assertEqual(task_router.DB_PATH, self.custom_db_path)
 
@@ -45,8 +69,13 @@ class TestDBPath(unittest.TestCase):
         if "SWARM_DB" in os.environ:
             del os.environ["SWARM_DB"]
 
+        self._reload_all()
+
         import orchestrator
         importlib.reload(orchestrator)
+        if 'scripts.orchestrator' in sys.modules:
+            import scripts.orchestrator
+            importlib.reload(scripts.orchestrator)
 
         expected_path = os.path.join(os.path.dirname(orchestrator.__file__), '..', 'swarm.db')
         self.assertEqual(os.path.abspath(orchestrator.DB_PATH), os.path.abspath(expected_path))
@@ -56,8 +85,13 @@ class TestDBPath(unittest.TestCase):
         if "SWARM_DB" in os.environ:
             del os.environ["SWARM_DB"]
 
+        self._reload_all()
+
         import task_router
         importlib.reload(task_router)
+        if 'scripts.task_router' in sys.modules:
+            import scripts.task_router
+            importlib.reload(scripts.task_router)
 
         expected_path = os.path.join(os.path.dirname(task_router.__file__), '..', 'swarm.db')
         self.assertEqual(os.path.abspath(task_router.DB_PATH), os.path.abspath(expected_path))

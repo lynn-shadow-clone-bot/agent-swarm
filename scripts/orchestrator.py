@@ -22,12 +22,12 @@ if __name__ == '__main__':
 
 try:
     from scripts.config_loader import config
-    from scripts.db_config import get_connection
+    from scripts.db_config import get_connection, DB_PATH
     from scripts.db_migrations import apply_migrations
     from scripts.openclaw_client import client as openclaw_client
 except ImportError:
     from config_loader import config
-    from db_config import get_connection
+    from db_config import get_connection, DB_PATH
     from db_migrations import apply_migrations
     from openclaw_client import client as openclaw_client
 
@@ -187,26 +187,31 @@ def assemble_team(task: str, team_types: List[str], clarifications: Dict) -> str
     """Assemble agent team and return task ID."""
     task_id = str(uuid.uuid4())
     conn = get_connection()
-    c = conn.cursor()
-    
-    # Create task
-    c.execute('''
-        INSERT INTO tasks (id, description, status, team_config)
-        VALUES (?, ?, ?, ?)
-    ''', (task_id, task, 'assembling', json.dumps(team_types)))
-    
-    # Create agents
-    for agent_type in team_types:
-        agent_id = str(uuid.uuid4())
+    try:
+        c = conn.cursor()
+
+        # Create task
         c.execute('''
-            INSERT INTO agents (id, task_id, agent_type, status)
+            INSERT INTO tasks (id, description, status, team_config)
             VALUES (?, ?, ?, ?)
-        ''', (agent_id, task_id, agent_type, 'pending'))
-    
-    conn.commit()
-    conn.close()
-    
-    return task_id
+        ''', (task_id, task, 'assembling', json.dumps(team_types)))
+
+        # Create agents
+        for agent_type in team_types:
+            agent_id = str(uuid.uuid4())
+            c.execute('''
+                INSERT INTO agents (id, task_id, agent_type, status)
+                VALUES (?, ?, ?, ?)
+            ''', (agent_id, task_id, agent_type, 'pending'))
+
+        conn.commit()
+        return task_id
+    except Exception as e:
+        logger.error(f"Failed to assemble team: {e}")
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def spawn_agents(task_id: str):
     """Spawn all agents for a task using OpenClaw."""
@@ -214,170 +219,215 @@ def spawn_agents(task_id: str):
         return
 
     conn = get_connection()
-    c = conn.cursor()
-    
-    c.execute('SELECT id, agent_type FROM agents WHERE task_id = ? AND status = ?', 
-              (task_id, 'pending'))
-    agents = c.fetchall()
-    
-    logger.info(f"\n🚀 Spawning {len(agents)} agents...")
-    
-    for agent_id, agent_type in agents:
-        if SHUTDOWN_REQUESTED:
-            logger.info("Shutdown requested, stopping spawn...")
-            break
-
-        template = load_agent_template(agent_type)
+    try:
+        c = conn.cursor()
         
-        logger.info(f"  Spawning {agent_type}...")
+        c.execute('SELECT id, agent_type FROM agents WHERE task_id = ? AND status = ?',
+                  (task_id, 'pending'))
+        agents = c.fetchall()
         
-        try:
-            session_key = openclaw_client.spawn_agent(
-                task=f"Task: {task_id}. Role: {agent_type}. {template.get('system_prompt', '')}",
-                label=f"{agent_type}-{task_id[:8]}",
-                model=template.get("model", "kimi-coding/k2p5"),
-                thinking=template.get("thinking", "high")
-            )
+        logger.info(f"\n🚀 Spawning {len(agents)} agents...")
 
-            c.execute('''
-                UPDATE agents
-                SET status = ?, session_key = ?, spawned_at = ?
-                WHERE id = ?
-            ''', ('active', session_key, datetime.now().isoformat(), agent_id))
+        failed_count = 0
+        for agent_id, agent_type in agents:
+            if SHUTDOWN_REQUESTED:
+                logger.info("Shutdown requested, stopping spawn...")
+                break
 
-            # Log spawn message
-            c.execute('''
-                INSERT INTO messages (task_id, agent_id, message_type, content)
-                VALUES (?, ?, ?, ?)
-            ''', (task_id, agent_id, 'SPAWNED', f'Agent {agent_type} ready: {session_key}'))
+            template = load_agent_template(agent_type)
 
-        except Exception as e:
-            logger.error(f"Failed to spawn agent {agent_type}: {e}")
+            logger.info(f"  Spawning {agent_type}...")
+
+            try:
+                session_key = openclaw_client.spawn_agent(
+                    task=f"Task: {task_id}. Role: {agent_type}. {template.get('system_prompt', '')}",
+                    label=f"{agent_type}-{task_id[:8]}",
+                    model=template.get("model", "kimi-coding/k2p5"),
+                    thinking=template.get("thinking", "high")
+                )
+
+                c.execute('''
+                    UPDATE agents
+                    SET status = ?, session_key = ?, spawned_at = ?
+                    WHERE id = ?
+                ''', ('active', session_key, datetime.now().isoformat(), agent_id))
+
+                # Log spawn message
+                c.execute('''
+                    INSERT INTO messages (task_id, agent_id, message_type, content)
+                    VALUES (?, ?, ?, ?)
+                ''', (task_id, agent_id, 'SPAWNED', f'Agent {agent_type} ready: {session_key}'))
+
+            except Exception as e:
+                logger.error(f"Failed to spawn agent {agent_type}: {e}")
+                c.execute('UPDATE agents SET status = ?, result = ? WHERE id = ?',
+                          ('failed', str(e), agent_id))
+                failed_count += 1
+
+        # Update task status
+        if failed_count > 0:
+            logger.error(f"{failed_count} agents failed to spawn. Marking task as failed.")
+            c.execute('UPDATE tasks SET status = ? WHERE id = ?', ('failed', task_id))
+        elif not SHUTDOWN_REQUESTED:
+            c.execute('UPDATE tasks SET status = ? WHERE id = ?', ('executing', task_id))
+
+        conn.commit()
+        logger.info(f"\n✅ All agents processed for task {task_id[:8]}...")
     
-    # Update task status
-    if not SHUTDOWN_REQUESTED:
-        c.execute('UPDATE tasks SET status = ? WHERE id = ?', ('executing', task_id))
-    
-    conn.commit()
-    conn.close()
-    
-    logger.info(f"\n✅ All agents spawned for task {task_id[:8]}...")
+    except Exception as e:
+        logger.error(f"Critical error in spawn_agents: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
 
 def execute_task(task_id: str):
     """Execute task with agent team."""
     conn = get_connection()
-    c = conn.cursor()
-    
-    c.execute('SELECT description FROM tasks WHERE id = ?', (task_id,))
-    task_row = c.fetchone()
-    if not task_row:
-        logger.error(f"Task {task_id} not found")
-        return
-    task = task_row[0]
-    
-    logger.info(f"\n📋 Executing: {task}")
-    logger.info("="*60)
-    
-    # Get all agents
-    c.execute('SELECT id, agent_type, session_key FROM agents WHERE task_id = ?', (task_id,))
-    agents = c.fetchall()
-    
-    logger.info(f"\n🔄 Coordinating {len(agents)} agents...")
-    
-    for i, (agent_id, agent_type, session_key) in enumerate(agents, 1):
-        if SHUTDOWN_REQUESTED:
-            break
+    try:
+        c = conn.cursor()
 
-        logger.info(f"  [{i}/{len(agents)}] {agent_type} working...")
+        # Check task status first
+        c.execute('SELECT description, status FROM tasks WHERE id = ?', (task_id,))
+        task_row = c.fetchone()
+        if not task_row:
+            logger.error(f"Task {task_id} not found")
+            return
+        task, status = task_row
 
-        # Notify agent
-        try:
-            if session_key and session_key != "unknown_session":
-                openclaw_client.send_message(session_key, "Start working on your task.")
-        except Exception as e:
-            logger.error(f"Failed to communicate with {agent_type}: {e}")
-        
-        c.execute('''
-            UPDATE agents SET status = ? WHERE id = ?
-        ''', ('working', agent_id))
-        
-        # Simulate completion
-        result = f"{agent_type} completed their subtask"
-        
-        c.execute('''
-            UPDATE agents 
-            SET status = ?, result = ?, completed_at = ?
-            WHERE id = ?
-        ''', ('completed', result, datetime.now().isoformat(), agent_id))
-        
-        c.execute('''
-            INSERT INTO messages (task_id, agent_id, message_type, content)
-            VALUES (?, ?, ?, ?)
-        ''', (task_id, agent_id, 'COMPLETED', result))
-    
-    if not SHUTDOWN_REQUESTED:
-        # Mark task complete
-        final_result = f"Task completed by {len(agents)} agents. All subtasks finished."
+        if status == 'failed':
+            logger.error(f"Task {task_id} is marked as failed. Skipping execution.")
+            return
 
-        c.execute('''
-            UPDATE tasks
-            SET status = ?, result = ?, completed_at = ?
-            WHERE id = ?
-        ''', ('completed', final_result, datetime.now().isoformat(), task_id))
+        logger.info(f"\n📋 Executing: {task}")
+        logger.info("="*60)
+        
+        # Get all agents
+        c.execute('SELECT id, agent_type, session_key FROM agents WHERE task_id = ?', (task_id,))
+        agents = c.fetchall()
+        
+        logger.info(f"\n🔄 Coordinating {len(agents)} agents...")
+        
+        failed_count = 0
+        for i, (agent_id, agent_type, session_key) in enumerate(agents, 1):
+            if SHUTDOWN_REQUESTED:
+                break
+
+            logger.info(f"  [{i}/{len(agents)}] {agent_type} working...")
+
+            # Notify agent
+            try:
+                if session_key and session_key != "unknown_session":
+                    openclaw_client.send_message(session_key, "Start working on your task.")
+            except Exception as e:
+                logger.error(f"Failed to communicate with {agent_type}: {e}")
+                c.execute('UPDATE agents SET status = ?, result = ? WHERE id = ?',
+                          ('failed', str(e), agent_id))
+                failed_count += 1
+                continue
+
+            c.execute('''
+                UPDATE agents SET status = ? WHERE id = ?
+            ''', ('working', agent_id))
+
+            # Simulate completion
+            result = f"{agent_type} completed their subtask"
+
+            c.execute('''
+                UPDATE agents
+                SET status = ?, result = ?, completed_at = ?
+                WHERE id = ?
+            ''', ('completed', result, datetime.now().isoformat(), agent_id))
+
+            c.execute('''
+                INSERT INTO messages (task_id, agent_id, message_type, content)
+                VALUES (?, ?, ?, ?)
+            ''', (task_id, agent_id, 'COMPLETED', result))
+        
+        if not SHUTDOWN_REQUESTED:
+            if failed_count > 0:
+                 error_msg = f"Task failed: {failed_count} agents encountered errors."
+                 logger.error(error_msg)
+                 c.execute('''
+                    UPDATE tasks
+                    SET status = ?, result = ?, completed_at = ?
+                    WHERE id = ?
+                ''', ('failed', error_msg, datetime.now().isoformat(), task_id))
+            else:
+                # Mark task complete
+                final_result = f"Task completed by {len(agents)} agents. All subtasks finished."
+
+                c.execute('''
+                    UPDATE tasks
+                    SET status = ?, result = ?, completed_at = ?
+                    WHERE id = ?
+                ''', ('completed', final_result, datetime.now().isoformat(), task_id))
+
+                logger.info("\n" + "="*60)
+                logger.info("✅ TASK COMPLETED!")
+                logger.info("="*60)
+                logger.info(f"\nTask ID: {task_id}")
+                logger.info(f"Agents: {len(agents)}")
+                logger.info(f"Status: 100% COMPLETE")
+                logger.info(f"\n{final_result}")
 
         conn.commit()
     
-    conn.close()
-    
-    logger.info("\n" + "="*60)
-    logger.info("✅ TASK COMPLETED!")
-    logger.info("="*60)
-    logger.info(f"\nTask ID: {task_id}")
-    logger.info(f"Agents: {len(agents)}")
-    logger.info(f"Status: 100% COMPLETE")
-    logger.info(f"\n{final_result}")
+    except Exception as e:
+        logger.error(f"Critical error in execute_task: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
 
 def get_status(task_id: str):
     """Get status of a task."""
     conn = get_connection()
-    c = conn.cursor()
-    
-    c.execute('SELECT * FROM tasks WHERE id = ?', (task_id,))
-    task = c.fetchone()
-    
-    if not task:
-        logger.error(f"Task {task_id} not found")
-        return
-    
-    logger.info(f"\n📊 Task Status: {task_id[:8]}...")
-    logger.info(f"Description: {task[1]}")
-    logger.info(f"Status: {task[2]}")
-    logger.info(f"Created: {task[4]}")
-    
-    c.execute('SELECT agent_type, status FROM agents WHERE task_id = ?', (task_id,))
-    agents = c.fetchall()
-    
-    logger.info(f"\nAgents ({len(agents)}):")
-    for agent_type, status in agents:
-        logger.info(f"  - {agent_type}: {status}")
-    
-    conn.close()
+    try:
+        c = conn.cursor()
+
+        c.execute('SELECT * FROM tasks WHERE id = ?', (task_id,))
+        task = c.fetchone()
+
+        if not task:
+            logger.error(f"Task {task_id} not found")
+            return
+
+        logger.info(f"\n📊 Task Status: {task_id[:8]}...")
+        logger.info(f"Description: {task[1]}")
+        logger.info(f"Status: {task[2]}")
+        logger.info(f"Created: {task[4]}")
+
+        c.execute('SELECT agent_type, status FROM agents WHERE task_id = ?', (task_id,))
+        agents = c.fetchall()
+
+        logger.info(f"\nAgents ({len(agents)}):")
+        for agent_type, status in agents:
+            logger.info(f"  - {agent_type}: {status}")
+            if status == 'failed':
+                 # Check if there is a result (error message)
+                 c.execute('SELECT result FROM agents WHERE task_id = ? AND agent_type = ?', (task_id, agent_type))
+                 res = c.fetchone()
+                 if res and res[0]:
+                     logger.info(f"    Error: {res[0]}")
+
+    finally:
+        conn.close()
 
 def list_tasks():
     """List all tasks."""
     conn = get_connection()
-    c = conn.cursor()
-    
-    c.execute('SELECT id, description, status, created_at FROM tasks ORDER BY created_at DESC')
-    tasks = c.fetchall()
-    
-    logger.info(f"\n📋 All Tasks ({len(tasks)} total):")
-    logger.info("-" * 80)
-    
-    for task_id, desc, status, created in tasks:
-        logger.info(f"{task_id[:8]}... | {status:12} | {desc[:40]}... | {created}")
-    
-    conn.close()
+    try:
+        c = conn.cursor()
+
+        c.execute('SELECT id, description, status, created_at FROM tasks ORDER BY created_at DESC')
+        tasks = c.fetchall()
+
+        logger.info(f"\n📋 All Tasks ({len(tasks)} total):")
+        logger.info("-" * 80)
+
+        for task_id, desc, status, created in tasks:
+            logger.info(f"{task_id[:8]}... | {status:12} | {desc[:40]}... | {created}")
+    finally:
+        conn.close()
 
 def main():
     parser = argparse.ArgumentParser(description='Agent Swarm Orchestrator')

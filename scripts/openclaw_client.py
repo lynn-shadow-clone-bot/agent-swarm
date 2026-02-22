@@ -6,8 +6,10 @@ from typing import Dict, Any, Optional
 
 try:
     from scripts.config_loader import config
+    from scripts.utils import retry
 except ImportError:
     from config_loader import config
+    from utils import retry
 
 logger = logging.getLogger('openclaw_client')
 
@@ -52,6 +54,7 @@ class OpenClawClient:
              logger.error("OpenClaw CLI not found")
              raise RuntimeError("OpenClaw CLI not installed")
 
+    @retry(max_retries=3, exceptions=(RuntimeError,))
     def spawn_agent(self, task: str, label: str, model: str, thinking: str = "high") -> str:
         """Spawn an agent and return session ID."""
         args = [
@@ -81,6 +84,7 @@ class OpenClawClient:
 
         return session_id
 
+    @retry(max_retries=3, exceptions=(RuntimeError,))
     def send_message(self, session_id: str, message: str) -> Dict[str, Any]:
         """Send message to agent session."""
         args = [
@@ -91,6 +95,7 @@ class OpenClawClient:
         ]
         return self._run_command(args)
 
+    @retry(max_retries=3, exceptions=(RuntimeError,))
     def get_status(self, session_id: str) -> Dict[str, Any]:
         """Get session status."""
         args = [
