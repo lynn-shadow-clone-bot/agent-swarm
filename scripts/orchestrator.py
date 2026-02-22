@@ -29,12 +29,16 @@ try:
     from scripts.db_migrations import apply_migrations
     from scripts.openclaw_client import client as openclaw_client
     from scripts.observability import metrics, tracing, alerts
+    from scripts.security import InputValidator, audit_logger, SecretsManager
+    from scripts.rate_limiter import task_submission_limiter
 except ImportError:
     from config_loader import config
     from db_config import get_pool
     from db_migrations import apply_migrations
     from openclaw_client import client as openclaw_client
     from observability import metrics, tracing, alerts
+    from security import InputValidator, audit_logger, SecretsManager
+    from rate_limiter import task_submission_limiter
 
 # --- Logging Setup ---
 class JsonFormatter(logging.Formatter):
@@ -250,6 +254,8 @@ async def assemble_team(task: str, team_types: List[str], clarifications: Dict) 
         task_id = str(uuid.uuid4())
 
         try:
+            audit_logger.log_event("TEAM_ASSEMBLY_STARTED", "orchestrator", {"task_id": task_id, "team": team_types})
+
             def _assemble_transaction():
                 pool = get_pool()
                 conn = pool.get_connection()
@@ -277,10 +283,12 @@ async def assemble_team(task: str, team_types: List[str], clarifications: Dict) 
             await asyncio.to_thread(_assemble_transaction)
 
             metrics.tasks_created.inc()
+            audit_logger.log_event("TASK_CREATED", "orchestrator", {"task_id": task_id})
             return task_id
         except Exception as e:
             logger.error(f"Failed to assemble team: {e}")
             alerts.send_alert("ERROR", f"Failed to assemble team: {e}", {"task": task})
+            audit_logger.log_event("TEAM_ASSEMBLY_FAILED", "orchestrator", {"task_id": task_id, "error": str(e)}, status="FAILURE")
             raise
 
 async def spawn_agents(task_id: str):
@@ -319,13 +327,15 @@ async def spawn_agents(task_id: str):
                         WHERE id = ?
                     ''', ('active', session_key, datetime.now().isoformat(), agent_id), commit=True)
 
+                    masked_key = SecretsManager.mask_secret(session_key)
                     await db_execute('''
                         INSERT INTO messages (task_id, agent_id, message_type, content)
                         VALUES (?, ?, ?, ?)
-                    ''', (task_id, agent_id, 'SPAWNED', f'Agent {agent_type} ready: {session_key}'), commit=True)
+                    ''', (task_id, agent_id, 'SPAWNED', f'Agent {agent_type} ready: {masked_key}'), commit=True)
 
                     metrics.agents_spawned.labels(agent_type=agent_type).inc()
                     metrics.active_agents.inc()
+                    audit_logger.log_event("AGENT_SPAWNED", "orchestrator", {"task_id": task_id, "agent_type": agent_type, "agent_id": agent_id})
                     return True
 
             except Exception as e:
@@ -334,6 +344,7 @@ async def spawn_agents(task_id: str):
                           ('failed', str(e), agent_id), commit=True)
                 metrics.agents_failed.labels(agent_type=agent_type).inc()
                 alerts.send_alert("ERROR", f"Failed to spawn agent {agent_type}: {e}", {"task_id": task_id})
+                audit_logger.log_event("AGENT_SPAWN_FAILED", "orchestrator", {"task_id": task_id, "agent_type": agent_type, "error": str(e)}, status="FAILURE")
                 return False
 
         results = await asyncio.gather(*[_spawn_single(aid, atype) for aid, atype in agents_list])
@@ -343,6 +354,7 @@ async def spawn_agents(task_id: str):
         if failed_count > 0:
             logger.error(f"{failed_count} agents failed to spawn. Marking task as failed.")
             await db_execute('UPDATE tasks SET status = ? WHERE id = ?', ('failed', task_id), commit=True)
+            audit_logger.log_event("TASK_FAILED_SPAWNING", "orchestrator", {"task_id": task_id, "failed_count": failed_count}, status="FAILURE")
         elif not SHUTDOWN_REQUESTED:
             await db_execute('UPDATE tasks SET status = ? WHERE id = ?', ('executing', task_id), commit=True)
 
@@ -486,6 +498,7 @@ async def execute_task(task_id: str):
 
                  metrics.tasks_failed.inc()
                  alerts.send_alert("ERROR", error_msg, {"task_id": task_id})
+                 audit_logger.log_event("TASK_FAILED", "orchestrator", {"task_id": task_id, "error": error_msg}, status="FAILURE")
             else:
                 final_result = f"Task completed by {len(agents)} agents. All subtasks finished."
                 await db_execute('''
@@ -503,6 +516,7 @@ async def execute_task(task_id: str):
 
                 metrics.tasks_completed.inc()
                 metrics.task_duration.observe(time.time() - start_time)
+                audit_logger.log_event("TASK_COMPLETED", "orchestrator", {"task_id": task_id, "duration": time.time() - start_time})
 
 async def get_status(task_id: str):
     """Get status of a task."""
@@ -571,9 +585,25 @@ async def async_main():
         return
     
     if args.task and args.team:
-        # Parse team
-        team_types = [t.strip() for t in args.team.split(',')]
-        
+        # Rate Limiting
+        if not task_submission_limiter.acquire():
+             msg = "Rate limit exceeded for task submission. Please try again later."
+             logger.error(msg)
+             audit_logger.log_event("TASK_SUBMISSION_REJECTED", "cli_user", {"reason": "rate_limit"}, status="FAILURE")
+             return
+
+        # Input Validation
+        try:
+            InputValidator.validate_task_description(args.task)
+            team_types = [t.strip() for t in args.team.split(',')]
+            InputValidator.validate_team_config(team_types)
+        except ValueError as e:
+            logger.error(f"Input Validation Error: {e}")
+            audit_logger.log_event("TASK_SUBMISSION_REJECTED", "cli_user", {"reason": str(e)}, status="FAILURE")
+            return
+
+        audit_logger.log_event("TASK_SUBMISSION_ACCEPTED", "cli_user", {"task": args.task[:50], "team": team_types})
+
         # Step 1: Clarify (Sync)
         clarifications = ask_clarifying_questions(args.task)
         

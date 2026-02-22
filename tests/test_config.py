@@ -47,7 +47,7 @@ class TestDBPath(unittest.TestCase):
             import scripts.orchestrator
             importlib.reload(scripts.orchestrator)
 
-        self.assertEqual(orchestrator.DB_PATH, self.custom_db_path)
+        self.assertEqual(orchestrator.config.database.path, self.custom_db_path)
 
     def test_task_router_db_path_env(self):
         """Test that task_router respects SWARM_DB environment variable."""
@@ -78,7 +78,7 @@ class TestDBPath(unittest.TestCase):
             importlib.reload(scripts.orchestrator)
 
         expected_path = os.path.join(os.path.dirname(orchestrator.__file__), '..', 'swarm.db')
-        self.assertEqual(os.path.abspath(orchestrator.DB_PATH), os.path.abspath(expected_path))
+        self.assertEqual(os.path.abspath(orchestrator.config.database.path), os.path.abspath(expected_path))
 
     def test_task_router_db_path_default(self):
         """Test that task_router uses default path when SWARM_DB is not set."""

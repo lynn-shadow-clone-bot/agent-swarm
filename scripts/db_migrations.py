@@ -79,6 +79,25 @@ def apply_migrations():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             '''
+        ],
+        3: [
+            '''
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                user_id TEXT,
+                details TEXT,
+                status TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            ''',
+            '''
+            CREATE TABLE IF NOT EXISTS rate_limits (
+                key TEXT PRIMARY KEY,
+                tokens REAL,
+                last_updated TIMESTAMP
+            );
+            '''
         ]
     }
 
