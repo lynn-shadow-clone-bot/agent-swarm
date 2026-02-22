@@ -15,8 +15,10 @@ if __name__ == '__main__':
 
 try:
     from scripts.db_config import get_connection, DB_PATH
+    from scripts.security import audit_logger
 except ImportError:
     from db_config import get_connection, DB_PATH
+    from security import audit_logger
 
 class TaskRouter:
     """Routes tasks to appropriate agents based on decomposition."""
@@ -164,8 +166,10 @@ class TaskRouter:
                     WHERE id = ?
                 ''', updates)
                 self.conn.commit()
+                audit_logger.log_event("TASKS_ASSIGNED", "task_router", {"task_id": task_id, "count": len(updates)})
         except Exception as e:
             print(f"Error assigning tasks: {e}")
+            audit_logger.log_event("TASKS_ASSIGNMENT_FAILED", "task_router", {"task_id": task_id, "error": str(e)}, status="FAILURE")
             self.conn.rollback()
             raise
     

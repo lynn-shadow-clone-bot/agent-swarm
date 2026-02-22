@@ -4,6 +4,7 @@ import os
 import sys
 import shutil
 import tempfile
+import asyncio
 from unittest.mock import MagicMock, patch
 
 # Add scripts dir to path
@@ -11,9 +12,15 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts import orchestrator
 from scripts.db_config import get_connection
+import scripts.db_config
 
 class TestOrchestratorFailure(unittest.TestCase):
     def setUp(self):
+        # Reset connection pool to ensure we use the new DB path
+        if scripts.db_config._pool:
+            scripts.db_config._pool.close_all()
+        scripts.db_config._pool = None
+        
         # Create a temporary directory for the database
         self.test_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.test_dir, 'test_swarm.db')
@@ -38,6 +45,9 @@ class TestOrchestratorFailure(unittest.TestCase):
 
     def tearDown(self):
         self.patcher.stop()
+        if scripts.db_config._pool:
+            scripts.db_config._pool.close_all()
+        scripts.db_config._pool = None
         shutil.rmtree(self.test_dir)
 
     @patch('scripts.openclaw_client.client.spawn_agent')
@@ -46,7 +56,7 @@ class TestOrchestratorFailure(unittest.TestCase):
         mock_spawn.side_effect = Exception("Simulated Spawn Failure")
 
         # Run spawn_agents
-        orchestrator.spawn_agents(self.task_id)
+        asyncio.run(orchestrator.spawn_agents(self.task_id))
 
         # Check task status
         conn = get_connection()
@@ -74,7 +84,7 @@ class TestOrchestratorFailure(unittest.TestCase):
         mock_send.side_effect = Exception("Simulated Communication Failure")
 
         # Run execute_task
-        orchestrator.execute_task(self.task_id)
+        asyncio.run(orchestrator.execute_task(self.task_id))
 
         # Check task status
         conn = get_connection()
