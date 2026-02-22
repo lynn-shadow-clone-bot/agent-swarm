@@ -252,27 +252,39 @@ def execute_task(task_id: str):
     # Simulate execution (in real implementation, use OpenClaw sessions_send)
     print(f"\n🔄 Coordinating {len(agents)} agents...")
     
+    # Batch update lists
+    working_updates = []
+    completed_updates = []
+    message_inserts = []
+
     for i, (agent_id, agent_type, session_key) in enumerate(agents, 1):
         print(f"  [{i}/{len(agents)}] {agent_type} working...")
         
-        # Simulate work
-        c.execute('''
-            UPDATE agents SET status = ? WHERE id = ?
-        ''', ('working', agent_id))
+        # Collect 'working' update
+        working_updates.append(('working', agent_id))
         
         # Simulate completion
         result = f"{agent_type} completed their subtask"
         
-        c.execute('''
-            UPDATE agents 
-            SET status = ?, result = ?, completed_at = ?
-            WHERE id = ?
-        ''', ('completed', result, datetime.now().isoformat(), agent_id))
+        # Collect 'completed' update
+        completed_updates.append(('completed', result, datetime.now().isoformat(), agent_id))
         
-        c.execute('''
-            INSERT INTO messages (task_id, agent_id, message_type, content)
-            VALUES (?, ?, ?, ?)
-        ''', (task_id, agent_id, 'COMPLETED', result))
+        # Collect message insert
+        message_inserts.append((task_id, agent_id, 'COMPLETED', result))
+
+    # Execute batch updates
+    c.executemany('UPDATE agents SET status = ? WHERE id = ?', working_updates)
+
+    c.executemany('''
+        UPDATE agents
+        SET status = ?, result = ?, completed_at = ?
+        WHERE id = ?
+    ''', completed_updates)
+
+    c.executemany('''
+        INSERT INTO messages (task_id, agent_id, message_type, content)
+        VALUES (?, ?, ?, ?)
+    ''', message_inserts)
     
     # Mark task complete
     final_result = f"Task completed by {len(agents)} agents. All subtasks finished."
