@@ -199,6 +199,11 @@ def spawn_agents(task_id: str):
     
     print(f"\n🚀 Spawning {len(agents)} agents...")
     
+    # Pre-calculate common values
+    spawned_at = datetime.now().isoformat()
+    agent_updates = []
+    message_inserts = []
+
     for agent_id, agent_type in agents:
         template = load_agent_template(agent_type)
         
@@ -214,17 +219,23 @@ def spawn_agents(task_id: str):
         # For now, create placeholder session key
         session_key = f"agent:swarm:{task_id}:{agent_id}"
         
-        c.execute('''
+        # Prepare batch update/insert data
+        agent_updates.append(('active', session_key, spawned_at, agent_id))
+        message_inserts.append((task_id, agent_id, 'SPAWNED', f'Agent {agent_type} ready'))
+
+    # Execute batch operations
+    if agent_updates:
+        c.executemany('''
             UPDATE agents 
             SET status = ?, session_key = ?, spawned_at = ?
             WHERE id = ?
-        ''', ('active', session_key, datetime.now().isoformat(), agent_id))
+        ''', agent_updates)
         
-        # Simulate spawn message
-        c.execute('''
+    if message_inserts:
+        c.executemany('''
             INSERT INTO messages (task_id, agent_id, message_type, content)
             VALUES (?, ?, ?, ?)
-        ''', (task_id, agent_id, 'SPAWNED', f'Agent {agent_type} ready'))
+        ''', message_inserts)
     
     # Update task status
     c.execute('UPDATE tasks SET status = ? WHERE id = ?', ('executing', task_id))
