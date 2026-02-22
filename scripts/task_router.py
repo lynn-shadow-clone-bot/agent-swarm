@@ -9,12 +9,13 @@ import os
 from typing import Dict, List, Tuple
 
 DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'swarm.db')
+DB_TIMEOUT = 30.0
 
 class TaskRouter:
     """Routes tasks to appropriate agents based on decomposition."""
     
     def __init__(self):
-        self.conn = sqlite3.connect(DB_PATH)
+        self.conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
         self.cursor = self.conn.cursor()
     
     def decompose_task(self, task_description: str, team_types: List[str]) -> List[Dict]:
@@ -196,7 +197,7 @@ def main():
     
     if args.decompose:
         # Get task info
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
         c = conn.cursor()
         
         c.execute('SELECT description, team_config FROM tasks WHERE id = ?', (args.task_id,))

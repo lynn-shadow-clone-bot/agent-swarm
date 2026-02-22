@@ -15,10 +15,11 @@ from typing import Dict, List, Optional
 
 # Database setup
 DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'swarm.db')
+DB_TIMEOUT = 30.0
 
 def init_db():
     """Initialize database tables."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     c = conn.cursor()
     
     c.execute('''
@@ -165,7 +166,7 @@ def assemble_team(task: str, team_types: List[str], clarifications: Dict) -> str
     """Assemble agent team and return task ID."""
     task_id = str(uuid.uuid4())
     
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     c = conn.cursor()
     
     # Create task
@@ -189,7 +190,7 @@ def assemble_team(task: str, team_types: List[str], clarifications: Dict) -> str
 
 def spawn_agents(task_id: str):
     """Spawn all agents for a task using OpenClaw sessions_spawn."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     c = conn.cursor()
     
     c.execute('SELECT id, agent_type FROM agents WHERE task_id = ? AND status = ?', 
@@ -235,7 +236,7 @@ def spawn_agents(task_id: str):
 
 def execute_task(task_id: str):
     """Execute task with agent team."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     c = conn.cursor()
     
     c.execute('SELECT description FROM tasks WHERE id = ?', (task_id,))
@@ -295,7 +296,7 @@ def execute_task(task_id: str):
 
 def get_status(task_id: str):
     """Get status of a task."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     c = conn.cursor()
     
     c.execute('SELECT * FROM tasks WHERE id = ?', (task_id,))
@@ -321,7 +322,7 @@ def get_status(task_id: str):
 
 def list_tasks():
     """List all tasks."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     c = conn.cursor()
     
     c.execute('SELECT id, description, status, created_at FROM tasks ORDER BY created_at DESC')
