@@ -14,6 +14,37 @@ Coordinate teams of specialized AI agents to solve complex tasks collaboratively
 python3 scripts/orchestrator.py --task "Build a login system" --team "code-writer,tester,reviewer"
 ```
 
+## Jules CLI Integration (NEW)
+
+For complex feature development, use Jules CLI (required for private repos):
+
+```bash
+# Start a Jules session for new features
+jules remote new --repo lynn-shadow-clone-bot/agent-swarm --session "Phase X: Feature Description"
+
+# Monitor session
+jules remote list --session
+
+# Pull results when complete
+jules remote pull --session <ID> --apply
+```
+
+**Note:** Private repos (like KyungiKyu/tasklist-app) require CLI - API integration only works for public repos.
+
+## Bombenfest Implementation Phases
+
+See `/tmp/bombenfest-plan.md` for full specification.
+
+| Phase | Status | Features |
+|-------|--------|----------|
+| **1: Foundation** | ✅ Complete | Config Management (YAML+Pydantic), DB Hardening (WAL), Real OpenClaw Integration, Structured Logging |
+| **2: Resilience** | ✅ Complete | Retry-Policy (Exponential Backoff + Jitter), Error Handling, Connection Rollback |
+| **3: Observability** | 🔄 Ready | Metrics, Execution Tracing, Health Checks, Alerting |
+| **4: Scalability** | ⏳ Pending | Async/Await, Connection Pooling, Task Prioritization |
+| **5: Security** | ⏳ Pending | Secrets Management, Input Validation, Rate Limiting |
+| **6: Testing** | 🔄 Partial | Unit Tests (3/3 passing), Integration Tests, Load Tests |
+| **7: API & Polish** | ⏳ Pending | REST API, WebSocket, CLI Improvements |
+
 ## Agent Templates
 
 Pre-defined agents in `references/AGENT_TEMPLATES.md`:
@@ -28,6 +59,29 @@ Pre-defined agents in `references/AGENT_TEMPLATES.md`:
 | **architect** | Design | System design, planning |
 | **documenter** | Documentation | Writing docs, comments |
 | **optimizer** | Performance | Optimization, refactoring |
+
+## Configuration
+
+Edit `config.yaml`:
+
+```yaml
+database:
+  path: ./swarm.db
+  timeout: 30.0
+  enable_wal: true
+
+logging:
+  level: INFO
+  file: logs/swarm.log
+  max_bytes: 10485760
+  backup_count: 10
+
+openclaw:
+  gateway: http://127.0.0.1:18789
+  retries: 3
+```
+
+Environment overrides: `SWARM_DB`, `OPENCLAW_GATEWAY`, `LOG_LEVEL`
 
 ## Workflow
 
@@ -62,6 +116,7 @@ Orchestrator coordinates agents:
 - Manages dependencies
 - Handles agent communication
 - Monitors progress
+- **NEW:** Automatic retry with exponential backoff on failures
 
 ### 4. Completion
 
@@ -112,6 +167,37 @@ python3 scripts/orchestrator.py --status --task-id <ID>
 python3 scripts/orchestrator.py --stop --task-id <ID>
 ```
 
+### Run Tests
+```bash
+python3 -m unittest tests.test_utils -v
+python3 -m unittest tests.test_orchestrator_failure -v
+python3 -m unittest tests.test_config -v
+```
+
+## Jules Development Workflow
+
+For implementing new phases:
+
+```bash
+# 1. Start Jules session
+jules remote new --repo lynn-shadow-clone-bot/agent-swarm \
+  --session "BOMBENFEST PHASE 3: Observability - Metrics & Health Checks"
+
+# 2. Monitor progress
+jules remote list --session
+
+# 3. Review and pull when done
+jules remote pull --session <ID> --apply
+
+# 4. Test locally
+python3 -m unittest discover tests/
+
+# 5. Commit and push
+git add .
+git commit -m "feat: Phase 3 - Observability"
+git push origin master
+```
+
 ## Advanced Usage
 
 ### Custom Agent Configuration
@@ -147,15 +233,22 @@ This skill integrates natively with OpenClaw's `sessions_spawn` for agent spawni
 - Agents run in isolated sessions
 - Results reported back to orchestrator
 - Native progress tracking via `subagents` tool
+- **NEW:** Retry logic with exponential backoff for failed spawns
 
 ## Troubleshooting
 
-**Agent not responding:** Check `sessions_list` for agent status
-**Task stuck:** Use `--force-complete` to mark as done
-**Need more agents:** Add to team and restart with `--resume`
+| Problem | Solution |
+|---------|----------|
+| Agent not responding | Check `sessions_list` for agent status |
+| Task stuck | Use `--force-complete` to mark as done |
+| Need more agents | Add to team and restart with `--resume` |
+| Spawn fails | Automatic retry (3x) with exponential backoff |
+| DB locked | WAL mode enabled - should not occur |
+| Config not loading | Check `config.yaml` syntax, use env vars as fallback |
 
 ## References
 
 - Agent Templates: See [AGENT_TEMPLATES.md](references/AGENT_TEMPLATES.md)
 - Architecture: See [ARCHITECTURE.md](references/ARCHITECTURE.md)
 - API Reference: See [API.md](references/API.md)
+- Bombenfest Plan: See `/tmp/bombenfest-plan.md`
