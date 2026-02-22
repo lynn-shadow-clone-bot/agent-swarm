@@ -34,9 +34,6 @@ class TaskRouter:
         """
         subtasks = []
         
-        # Task analysis keywords
-        task_lower = task_description.lower()
-        
         for agent_type in team_types:
             if agent_type == "architect":
                 subtasks.append({
