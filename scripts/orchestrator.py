@@ -131,35 +131,43 @@ def ask_clarifying_questions(task: str) -> Dict:
     print(f"\nTask: {task}")
     print("\nBefore assembling the team, I need to clarify a few things:")
     
-    questions = [
-        "What is the expected output format? (e.g., code files, documentation, analysis)",
-        "Are there any specific constraints or requirements?",
-        "What would make this task 100% complete in your eyes?",
-        "Is there a preferred technology stack or approach?"
+    questions_config = [
+        {
+            "key": "output_format",
+            "question": "What is the expected output format? (e.g., code files, documentation, analysis)",
+            "default": "code files"
+        },
+        {
+            "key": "constraints",
+            "question": "Are there any specific constraints or requirements?",
+            "default": "none"
+        },
+        {
+            "key": "success_criteria",
+            "question": "What would make this task 100% complete in your eyes?",
+            "default": "working implementation"
+        },
+        {
+            "key": "tech_stack",
+            "question": "Is there a preferred technology stack or approach?",
+            "default": "auto-detect"
+        }
     ]
-    
-    answers = {}
     
     # For non-interactive mode, use defaults
     if not sys.stdin.isatty():
         print("\n(Running in non-interactive mode, using defaults)")
-        return {
-            "output_format": "code files",
-            "constraints": "none",
-            "success_criteria": "working implementation",
-            "tech_stack": "auto-detect"
-        }
+        return {q["key"]: q["default"] for q in questions_config}
+
+    answers = {}
     
-    for i, question in enumerate(questions, 1):
-        print(f"\n{i}. {question}")
+    for i, config in enumerate(questions_config, 1):
+        print(f"\n{i}. {config['question']}")
         answer = input("   > ").strip()
-        answers[f"q{i}"] = answer if answer else "none"
+        answers[config["key"]] = answer if answer else "none"
     
     return {
-        "output_format": answers.get("q1", "code files"),
-        "constraints": answers.get("q2", "none"),
-        "success_criteria": answers.get("q3", "working implementation"),
-        "tech_stack": answers.get("q4", "auto-detect")
+        q["key"]: answers.get(q["key"], q["default"]) for q in questions_config
     }
 
 def assemble_team(task: str, team_types: List[str], clarifications: Dict) -> str:
