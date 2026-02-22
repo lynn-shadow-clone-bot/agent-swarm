@@ -179,24 +179,31 @@ python3 -m unittest tests.test_config -v
 For implementing new phases:
 
 ```bash
-# 1. Start Jules session
-jules remote new --repo lynn-shadow-clone-bot/agent-swarm \
-  --session "BOMBENFEST PHASE 3: Observability - Metrics & Health Checks"
+# 1. Start Jules session (automatically added to monitoring)
+python3 scripts/start_jules_session.py \
+  --repo lynn-shadow-clone-bot/agent-swarm \
+  --session "BOMBENFEST PHASE X: Feature Description"
 
-# 2. Monitor progress
-jules remote list --session
+# The session is now being monitored by cronjob every minute.
+# You'll get a Telegram notification when completed.
 
-# 3. Review and pull when done
+# 2. Review and pull when done
 jules remote pull --session <ID> --apply
 
-# 4. Test locally
+# 3. Test locally
 python3 -m unittest discover tests/
 
-# 5. Commit and push
+# 4. Commit and push
 git add .
-git commit -m "feat: Phase 3 - Observability"
+git commit -m "feat: Phase X - Feature"
 git push origin master
 ```
+
+**NEW: Automatic Session Monitoring**
+- `scripts/start_jules_session.py` - Starts Jules session AND adds to tracking automatically
+- `scripts/jules_monitor.py` - Runs every minute via cronjob, checks all tracked sessions
+- You'll receive a Telegram notification when any session completes
+- Manual tracking: `python3 scripts/add_jules_session.py <ID> <repo> <description>`
 
 ## Advanced Usage
 
